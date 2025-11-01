@@ -6,7 +6,7 @@ import http from 'http'
 import { Server as SocketIOServer } from 'socket.io'
 import path from 'path'
 import { fileURLToPath } from 'url'
-import { initDb, createSession as dbCreateSession, saveToken as dbSaveToken, saveShortCode as dbSaveShortCode, deactivateToken as dbDeactivateToken, deleteShortCode as dbDeleteShortCode, markPresent as dbMarkPresent, enrollStudent as dbEnrollStudent, unenrollStudent as dbUnenrollStudent, getEnrollments as dbGetEnrollments, isEnrolled as dbIsEnrolled, getEnrollmentRecords as dbGetEnrollmentRecords, createStudent as dbCreateStudent, getStudentByRegNo as dbGetStudentByRegNo, updateStudentPassword as dbUpdateStudentPassword, createStaff, getStaffByEmail, listStaff } from './db.js'
+import { initDb, createSession as dbCreateSession, saveToken as dbSaveToken, saveShortCode as dbSaveShortCode, deactivateToken as dbDeactivateToken, deleteShortCode as dbDeleteShortCode, markPresent as dbMarkPresent, enrollStudent as dbEnrollStudent, unenrollStudent as dbUnenrollStudent, getEnrollments as dbGetEnrollments, isEnrolled as dbIsEnrolled, getEnrollmentRecords as dbGetEnrollmentRecords, createStudent as dbCreateStudent, getStudentByRegNo as dbGetStudentByRegNo, updateStudentPassword as dbUpdateStudentPassword, createStaff, getStaffByEmail, getStaffById, listStaff, updateStaff, deleteStaff, getStaffCount, listAllStudents, updateStudent, deleteStudent, getStudentCount, getStudentAttendance, getAllAttendanceRecords, getSessionById, getAllSessions, createLeaveRequest, getAllLeaveRequests, getLeaveRequestsByStudent, getLeaveRequestsByStatus, updateLeaveStatus, deleteLeaveRequest, getSystemSettings, updateSystemSettings } from './db.js'
 
 const app = express()
 initDb()
@@ -38,18 +38,13 @@ app.use((req, _res, next) => {
 
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-me'
 
-// One-time seed for demo data
+// One-time seed for demo data - DISABLED (data already exists in enrollments.db)
 ;(async function seedOnce(){
   try {
-    const courseId = '21CS701'
-    const students = [
-      'ES22CJ27','ES22CJ56','ES22CJ07','ES22CJ41','ES22CJ35','ES22CJ57','ES22CJ08','ES22CJ12','ES22CJ61','ES22CJ59','ES22CJ52','ES22CJ49','ES22CJ58','ES22CJ36','ES22CJ26','ES22CJ21','ES22CJ24','ES22CJ60','ES22CJ30','ES22CJ31','ES22CJ17','ES22CJ63','ES22CJ47','ES22CJ06','ES22CJ23','ES22CJ11','ES22CJ42','ES22CJ01','ES22CJ28','ES22CJ18','ES22CJ40','ES22CJ48','ES22CJ55'
-    ]
-    const existing = await dbGetEnrollments(courseId)
-    if (!existing || existing.length === 0) {
-      for (const sid of students) { await dbEnrollStudent(courseId, sid) }
-      console.log(`[seed] Enrolled ${students.length} students to ${courseId}`)
-    }
+    // Seed is disabled - all student data is already in enrollments.db
+    // This prevents duplicate student creation
+    console.log('[seed] Seed disabled - using existing enrollment data')
+    
     // Create demo staff user
     const staffEmail = 'staff@demo.com'
     const found = await getStaffByEmail(staffEmail)
@@ -395,6 +390,284 @@ app.post('/auth/admin/login', async (req, res) => {
   return res.status(401).json({ error: 'invalid_credentials' })
 })
 
+// Staff Profile & Analytics APIs
+
+// Get staff profile by ID
+app.get('/staff/:staffId/profile', async (req, res) => {
+  try {
+    const { staffId } = req.params
+    const staff = await getStaffByEmail(staffId)
+    
+    if (!staff) {
+      return res.status(404).json({ error: 'staff_not_found' })
+    }
+    
+    // Return profile data without password
+    const profile = {
+      id: staff.id,
+      name: staff.name,
+      email: staff.email,
+      department: staff.department || 'Computer Science',
+      contact: staff.contact || '',
+      designation: staff.designation || 'Assistant Professor',
+      experience: staff.experience || '5 years',
+      qualifications: staff.qualifications || ['M.Sc. in Computer Science', 'B.Sc. in Information Technology'],
+      teachingSubjects: staff.teachingSubjects || ['Database Systems', 'Software Engineering'],
+      joiningDate: staff.joiningDate || null
+    }
+    
+    return res.json({ profile })
+  } catch (error) {
+    console.error('Get staff profile error:', error)
+    return res.status(500).json({ error: 'internal_error' })
+  }
+})
+
+// Update staff profile
+app.put('/staff/:staffId/profile', async (req, res) => {
+  try {
+    const { staffId } = req.params
+    const updates = req.body
+    
+    // Remove sensitive fields
+    delete updates.password
+    delete updates.id
+    delete updates.email
+    
+    const staff = await getStaffByEmail(staffId)
+    if (!staff) {
+      return res.status(404).json({ error: 'staff_not_found' })
+    }
+    
+    // Update staff record
+    const updatedStaff = { ...staff, ...updates }
+    await createStaff(updatedStaff)
+    
+    // Return updated profile without password
+    const profile = {
+      id: updatedStaff.id,
+      name: updatedStaff.name,
+      email: updatedStaff.email,
+      department: updatedStaff.department,
+      contact: updatedStaff.contact,
+      designation: updatedStaff.designation,
+      experience: updatedStaff.experience,
+      qualifications: updatedStaff.qualifications,
+      teachingSubjects: updatedStaff.teachingSubjects
+    }
+    
+    return res.json({ profile, message: 'Profile updated successfully' })
+  } catch (error) {
+    console.error('Update staff profile error:', error)
+    return res.status(500).json({ error: 'internal_error' })
+  }
+})
+
+// Change staff password
+app.post('/staff/:staffId/change-password', async (req, res) => {
+  try {
+    const { staffId } = req.params
+    const { currentPassword, newPassword } = req.body
+    
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ error: 'missing_required_fields' })
+    }
+    
+    if (newPassword.length < 6) {
+      return res.status(400).json({ error: 'password_too_short' })
+    }
+    
+    const staff = await getStaffByEmail(staffId)
+    if (!staff) {
+      return res.status(404).json({ error: 'staff_not_found' })
+    }
+    
+    if (staff.password !== currentPassword) {
+      return res.status(401).json({ error: 'current_password_incorrect' })
+    }
+    
+    // Update password
+    const updatedStaff = { ...staff, password: newPassword }
+    await createStaff(updatedStaff)
+    
+    return res.json({ message: 'password_updated_successfully' })
+  } catch (error) {
+    console.error('Staff password change error:', error)
+    return res.status(500).json({ error: 'internal_error' })
+  }
+})
+
+// Get staff analytics
+app.get('/staff/:staffId/analytics', async (req, res) => {
+  try {
+    const courseId = '21CS701'
+    const enrollmentRecords = await dbGetEnrollmentRecords(courseId)
+    const allAttendance = await getAllAttendanceRecords()
+    const allSessions = await getAllSessions()
+    
+    const totalStudents = enrollmentRecords.length
+    const totalClasses = allSessions.length
+    
+    // Calculate average attendance across all sessions
+    const sessionAttendance = new Map()
+    for (const record of allAttendance) {
+      const count = sessionAttendance.get(record.sessionId) || 0
+      sessionAttendance.set(record.sessionId, count + 1)
+    }
+    
+    let totalAttendanceSum = 0
+    let validSessionsCount = 0
+    for (const [sessionId, presentCount] of sessionAttendance.entries()) {
+      if (totalStudents > 0) {
+        totalAttendanceSum += (presentCount / totalStudents) * 100
+        validSessionsCount++
+      }
+    }
+    
+    const averageAttendance = validSessionsCount > 0 
+      ? Math.round(totalAttendanceSum / validSessionsCount) 
+      : 0
+    
+    // Low attendance alerts (students below 75%)
+    let lowAttendanceCount = 0
+    for (const enrollment of enrollmentRecords) {
+      const studentAttendance = await getStudentAttendance(enrollment.studentId)
+      const percentage = totalClasses > 0 
+        ? Math.round((studentAttendance.length / totalClasses) * 100) 
+        : 0
+      if (percentage < 75 && totalClasses > 0) {
+        lowAttendanceCount++
+      }
+    }
+    
+    // Attendance distribution (present vs absent vs on leave)
+    let totalPossibleAttendance = totalStudents * totalClasses
+    let totalPresent = allAttendance.length
+    let totalAbsent = totalPossibleAttendance - totalPresent
+    
+    // Daily trend data (last 7 days)
+    const today = new Date()
+    const dailyTrend = []
+    for (let i = 6; i >= 0; i--) {
+      const date = new Date(today)
+      date.setDate(date.getDate() - i)
+      date.setHours(0, 0, 0, 0)
+      const dateStr = date.toISOString().split('T')[0]
+      
+      const daySessions = allSessions.filter(s => {
+        if (!s.startTime) return false
+        const sessionDate = new Date(s.startTime).toISOString().split('T')[0]
+        return sessionDate === dateStr
+      })
+      
+      const daySessionIds = new Set(daySessions.map(s => s.id))
+      const dayAttendance = allAttendance.filter(a => daySessionIds.has(a.sessionId))
+      
+      const dayTotal = daySessions.length * totalStudents
+      const dayPresent = dayAttendance.length
+      const dayPercentage = dayTotal > 0 ? Math.round((dayPresent / dayTotal) * 100) : 0
+      
+      dailyTrend.push({
+        date: dateStr,
+        day: date.toLocaleDateString('en-US', { weekday: 'short' }),
+        percentage: dayPercentage,
+        present: dayPresent,
+        total: dayTotal
+      })
+    }
+    
+    // Hourly attendance pattern (0-23 hours)
+    const hourlyPattern = Array(24).fill(0).map((_, hour) => {
+      const hourSessions = allSessions.filter(s => {
+        if (!s.startTime) return false
+        const sessionHour = new Date(s.startTime).getHours()
+        return sessionHour === hour
+      })
+      
+      const hourSessionIds = new Set(hourSessions.map(s => s.id))
+      const hourAttendance = allAttendance.filter(a => hourSessionIds.has(a.sessionId))
+      
+      return {
+        hour: `${hour}:00`,
+        sessions: hourSessions.length,
+        attendance: hourAttendance.length
+      }
+    }).filter(h => h.sessions > 0)
+    
+    return res.json({
+      totalStudents,
+      averageAttendance,
+      totalClasses,
+      lowAttendanceAlerts: lowAttendanceCount,
+      attendanceDistribution: {
+        present: totalPresent,
+        absent: totalAbsent,
+        onLeave: 0 // Can be calculated from leave requests if needed
+      },
+      dailyTrend,
+      hourlyPattern,
+      stats: {
+        totalSessions: totalClasses,
+        averageClassSize: totalStudents,
+        attendanceRate: averageAttendance,
+        activeStudents: enrollmentRecords.length
+      }
+    })
+  } catch (error) {
+    console.error('Staff analytics error:', error)
+    return res.status(500).json({ error: 'internal_error' })
+  }
+})
+
+// Get staff recent activity
+app.get('/staff/:staffId/recent-activity', async (req, res) => {
+  try {
+    const allAttendance = await getAllAttendanceRecords()
+    const allSessions = await getAllSessions()
+    const enrollmentRecords = await dbGetEnrollmentRecords('21CS701')
+    const leaveRequests = await getAllLeaveRequests()
+    
+    const activities = []
+    
+    // Add recent attendance records
+    const recentAttendance = allAttendance.slice(-10).reverse()
+    for (const record of recentAttendance) {
+      const enrollment = enrollmentRecords.find(e => e.studentId === record.studentId)
+      const session = await getSessionById(record.sessionId)
+      activities.push({
+        type: 'attendance',
+        icon: '✅',
+        text: `Marked attendance for ${enrollment?.name || record.studentId}`,
+        course: session?.courseId || 'Class',
+        time: getTimeAgo(record.timestamp || Date.now()),
+        timestamp: record.timestamp || Date.now()
+      })
+    }
+    
+    // Add recent leave approvals/rejections
+    const recentLeaves = leaveRequests.slice(-5).reverse()
+    for (const leave of recentLeaves) {
+      if (leave.status !== 'pending') {
+        activities.push({
+          type: 'leave',
+          icon: leave.status === 'approved' ? '✅' : '❌',
+          text: `${leave.status === 'approved' ? 'Approved' : 'Rejected'} leave request from ${leave.studentName}`,
+          time: getTimeAgo(leave.reviewedAt || leave.updatedAt || Date.now()),
+          timestamp: leave.reviewedAt || leave.updatedAt || Date.now()
+        })
+      }
+    }
+    
+    // Sort by timestamp (most recent first)
+    activities.sort((a, b) => b.timestamp - a.timestamp)
+    
+    return res.json({ activities: activities.slice(0, 15) })
+  } catch (error) {
+    console.error('Staff recent activity error:', error)
+    return res.status(500).json({ error: 'internal_error' })
+  }
+})
+
 // Enrollment routes
 app.get('/courses/:courseId/enrollments', async (req, res) => {
   const { courseId } = req.params
@@ -417,6 +690,1060 @@ app.delete('/courses/:courseId/enroll', async (req, res) => {
   await dbUnenrollStudent(courseId, studentId)
   return res.json({ courseId, studentId, status: 'unenrolled' })
 })
+
+// Helper function to calculate attendance statistics
+function calculateAttendanceStats(attendedCount, totalSessions) {
+  if (totalSessions === 0) {
+    return {
+      percentage: 0,
+      attended: 0,
+      missed: 0,
+      total: 0,
+      status: 'no_data'
+    }
+  }
+  
+  const percentage = Math.round((attendedCount / totalSessions) * 100)
+  let status = 'excellent'
+  if (percentage < 75) status = 'poor'
+  else if (percentage < 85) status = 'average'
+  else if (percentage < 95) status = 'good'
+  
+  return {
+    percentage,
+    attended: attendedCount,
+    missed: totalSessions - attendedCount,
+    total: totalSessions,
+    status
+  }
+}
+
+// Helper function to get date range statistics
+function getDateRangeStats(attendance, sessions, startDate, endDate) {
+  const start = new Date(startDate).getTime()
+  const end = new Date(endDate).getTime()
+  
+  const relevantSessions = sessions.filter(s => {
+    if (!s.startTime) return false
+    const sessionTime = new Date(s.startTime).getTime()
+    return sessionTime >= start && sessionTime <= end
+  })
+  
+  const sessionIds = new Set(relevantSessions.map(s => s.id))
+  const attendedInRange = attendance.filter(a => sessionIds.has(a.sessionId))
+  
+  return calculateAttendanceStats(attendedInRange.length, relevantSessions.length)
+}
+
+// Dashboard statistics endpoints
+app.get('/dashboard/stats', async (req, res) => {
+  try {
+    const courseId = '21CS701'
+    const enrollmentRecords = await dbGetEnrollmentRecords(courseId)
+    const allAttendance = await getAllAttendanceRecords()
+    const allSessions = await getAllSessions()
+    
+    // Calculate today's attendance
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    const todayStr = today.toISOString().split('T')[0]
+    
+    const todaySessions = allSessions.filter(s => {
+      if (!s.startTime) return false
+      const sessionDate = new Date(s.startTime).toISOString().split('T')[0]
+      return sessionDate === todayStr
+    })
+    
+    const todayPresent = new Set()
+    const todaySessionIds = new Set(todaySessions.map(s => s.id))
+    allAttendance.filter(a => todaySessionIds.has(a.sessionId))
+      .forEach(a => todayPresent.add(a.studentId))
+    
+    const totalStudents = enrollmentRecords.length
+    const presentToday = todayPresent.size
+    const absentToday = totalStudents - presentToday
+    const todayAttendanceRate = todaySessions.length > 0 && totalStudents > 0 
+      ? Math.round((presentToday / totalStudents) * 100) 
+      : 0
+    
+    // Overall attendance rate (all sessions)
+    const totalSessionCount = allSessions.length
+    let overallPresentCount = 0
+    let overallTotalPossible = totalStudents * totalSessionCount
+    
+    for (const enrollment of enrollmentRecords) {
+      const studentAttendance = await getStudentAttendance(enrollment.studentId)
+      overallPresentCount += studentAttendance.length
+    }
+    
+    const overallAttendanceRate = overallTotalPossible > 0 
+      ? Math.round((overallPresentCount / overallTotalPossible) * 100) 
+      : 0
+    
+    // Low attendance students (below 75%)
+    const lowAttendanceStudents = []
+    const studentStats = []
+    
+    for (const enrollment of enrollmentRecords) {
+      const studentAttendance = await getStudentAttendance(enrollment.studentId)
+      const stats = calculateAttendanceStats(studentAttendance.length, totalSessionCount)
+      
+      const studentData = {
+        name: enrollment.name || enrollment.studentId,
+        regNo: enrollment.regNo || enrollment.studentId,
+        studentId: enrollment.studentId,
+        ...stats
+      }
+      
+      studentStats.push(studentData)
+      
+      if (stats.percentage < 75 && totalSessionCount > 0) {
+        lowAttendanceStudents.push(studentData)
+      }
+    }
+    
+    // Sort low attendance by percentage (lowest first)
+    lowAttendanceStudents.sort((a, b) => a.percentage - b.percentage)
+    
+    // Recent activity with names and details
+    const recentActivity = []
+    const recentRecords = allAttendance.slice(-20).reverse()
+    
+    for (const record of recentRecords) {
+      const enrollment = enrollmentRecords.find(e => e.studentId === record.studentId)
+      const session = await getSessionById(record.sessionId)
+      
+      recentActivity.push({
+        studentId: record.studentId,
+        studentName: enrollment ? enrollment.name : record.studentId,
+        sessionId: record.sessionId,
+        courseId: session?.courseId || 'Unknown',
+        timestamp: record.timestamp || Date.now(),
+        timeAgo: getTimeAgo(record.timestamp || Date.now())
+      })
+    }
+    
+    // Weekly statistics (last 7 days)
+    const weekAgo = new Date()
+    weekAgo.setDate(weekAgo.getDate() - 7)
+    const weekStats = getDateRangeStats(allAttendance, allSessions, weekAgo, new Date())
+    
+    // Monthly statistics (last 30 days)
+    const monthAgo = new Date()
+    monthAgo.setDate(monthAgo.getDate() - 30)
+    const monthStats = getDateRangeStats(allAttendance, allSessions, monthAgo, new Date())
+    
+    return res.json({
+      totalStudents,
+      presentToday,
+      absentToday,
+      todayAttendanceRate,
+      overallAttendanceRate,
+      totalSessions: totalSessionCount,
+      lowAttendanceStudents: lowAttendanceStudents.slice(0, 15),
+      recentActivity: recentActivity.slice(0, 10),
+      weeklyStats: weekStats,
+      monthlyStats: monthStats,
+      studentStats: studentStats.slice(0, 5).sort((a, b) => b.percentage - a.percentage) // Top 5 students
+    })
+  } catch (error) {
+    console.error('Dashboard stats error:', error)
+    return res.status(500).json({ error: 'internal_error' })
+  }
+})
+
+// Helper function for relative time
+function getTimeAgo(timestamp) {
+  const seconds = Math.floor((Date.now() - timestamp) / 1000)
+  if (seconds < 60) return `${seconds} seconds ago`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes} minute${minutes > 1 ? 's' : ''} ago`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours} hour${hours > 1 ? 's' : ''} ago`
+  const days = Math.floor(hours / 24)
+  return `${days} day${days > 1 ? 's' : ''} ago`
+}
+
+// Student list with attendance
+app.get('/students/list', async (req, res) => {
+  try {
+    // Get enrollment data which has proper names
+    const courseId = '21CS701'
+    const enrollmentRecords = await dbGetEnrollmentRecords(courseId)
+    const allSessions = await getAllSessions()
+    
+    const studentsWithAttendance = []
+    
+    // Create a unique map to avoid duplicates
+    const studentMap = new Map()
+    
+    for (const enrollment of enrollmentRecords) {
+      const studentId = enrollment.studentId
+      
+      // Skip if already processed
+      if (studentMap.has(studentId)) continue
+      
+      const attendance = await getStudentAttendance(studentId)
+      const stats = calculateAttendanceStats(attendance.length, allSessions.length)
+      
+      // Get last attendance
+      const lastAttendance = attendance.length > 0 ? attendance[attendance.length - 1] : null
+      let lastSeen = 'Never'
+      let lastSeenDate = null
+      
+      if (lastAttendance && lastAttendance.timestamp) {
+        const date = new Date(lastAttendance.timestamp)
+        lastSeen = date.toLocaleString('en-US', { 
+          month: 'short', 
+          day: 'numeric', 
+          year: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit'
+        })
+        lastSeenDate = lastAttendance.timestamp
+      }
+      
+      // Calculate monthly attendance
+      const now = new Date()
+      const monthAgo = new Date(now.getFullYear(), now.getMonth(), 1)
+      const monthStats = getDateRangeStats(attendance, allSessions, monthAgo, now)
+      
+      // Calculate weekly attendance
+      const weekAgo = new Date()
+      weekAgo.setDate(weekAgo.getDate() - 7)
+      const weekStats = getDateRangeStats(attendance, allSessions, weekAgo, now)
+      
+      studentMap.set(studentId, {
+        name: enrollment.name || studentId,
+        regNo: enrollment.regNo || studentId,
+        studentId: studentId,
+        email: enrollment.regNo ? `${enrollment.regNo}@student.edu` : `${studentId}@student.edu`,
+        department: 'Computer Science',
+        attendance: stats.percentage,
+        attendedSessions: stats.attended,
+        missedSessions: stats.missed,
+        totalSessions: stats.total,
+        status: stats.status,
+        lastSeen,
+        lastSeenDate,
+        monthlyAttendance: monthStats.percentage,
+        weeklyAttendance: weekStats.percentage,
+        trend: getTrend(weekStats.percentage, monthStats.percentage)
+      })
+    }
+    
+    // Convert to array and sort by student ID
+    const studentsList = Array.from(studentMap.values())
+    studentsList.sort((a, b) => {
+      const idA = a.studentId || a.regNo
+      const idB = b.studentId || b.regNo
+      return idA.localeCompare(idB, undefined, { numeric: true })
+    })
+    
+    return res.json({ students: studentsList })
+  } catch (error) {
+    console.error('Student list error:', error)
+    return res.status(500).json({ error: 'internal_error' })
+  }
+})
+
+// Helper function to determine attendance trend
+function getTrend(weeklyPercentage, monthlyPercentage) {
+  const diff = weeklyPercentage - monthlyPercentage
+  if (diff > 5) return 'improving'
+  if (diff < -5) return 'declining'
+  return 'stable'
+}
+
+// Student individual dashboard stats
+app.get('/student/:studentId/stats', async (req, res) => {
+  try {
+    const { studentId } = req.params
+    const student = await getStudentByRegNo(studentId)
+    
+    if (!student) {
+      return res.status(404).json({ error: 'student_not_found' })
+    }
+    
+    const attendance = await getStudentAttendance(studentId)
+    const allSessions = await getAllSessions()
+    
+    // Overall statistics
+    const overallStats = calculateAttendanceStats(attendance.length, allSessions.length)
+    
+    // Weekly stats (last 7 days)
+    const weekAgo = new Date()
+    weekAgo.setDate(weekAgo.getDate() - 7)
+    const weekStats = getDateRangeStats(attendance, allSessions, weekAgo, new Date())
+    
+    // Monthly stats (current month)
+    const now = new Date()
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1)
+    const monthStats = getDateRangeStats(attendance, allSessions, monthStart, now)
+    
+    // Today's attendance
+    const todayStart = new Date()
+    todayStart.setHours(0, 0, 0, 0)
+    const todayEnd = new Date()
+    todayEnd.setHours(23, 59, 59, 999)
+    const todayStats = getDateRangeStats(attendance, allSessions, todayStart, todayEnd)
+    
+    // Recent attendance records (last 15)
+    const recentAttendance = []
+    const sortedAttendance = [...attendance].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
+    
+    for (const record of sortedAttendance.slice(0, 15)) {
+      const session = await getSessionById(record.sessionId)
+      if (session) {
+        const sessionDate = new Date(session.startTime)
+        recentAttendance.push({
+          date: sessionDate.toISOString().split('T')[0],
+          dateFormatted: sessionDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+          subject: session.courseId || 'Class Session',
+          time: sessionDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
+          status: 'Present',
+          sessionId: session.id,
+          timeAgo: getTimeAgo(record.timestamp || session.startTime)
+        })
+      }
+    }
+    
+    // Get missed sessions (sessions where student was absent)
+    const attendedSessionIds = new Set(attendance.map(a => a.sessionId))
+    const missedSessions = []
+    
+    for (const session of allSessions) {
+      if (session.startTime && !attendedSessionIds.has(session.id)) {
+        const sessionDate = new Date(session.startTime)
+        missedSessions.push({
+          date: sessionDate.toISOString().split('T')[0],
+          dateFormatted: sessionDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+          subject: session.courseId || 'Class Session',
+          time: sessionDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
+          status: 'Absent',
+          sessionId: session.id
+        })
+      }
+    }
+    
+    // Sort missed sessions by date (most recent first)
+    missedSessions.sort((a, b) => new Date(b.date) - new Date(a.date))
+    
+    // Monthly breakdown (last 6 months)
+    const monthlyAttendance = []
+    const monthsData = {}
+    
+    // Initialize last 6 months
+    for (let i = 0; i < 6; i++) {
+      const date = new Date()
+      date.setMonth(date.getMonth() - i)
+      const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
+      monthsData[monthKey] = { attended: 0, total: 0, month: date }
+    }
+    
+    // Count attended sessions per month
+    for (const record of attendance) {
+      const session = await getSessionById(record.sessionId)
+      if (session && session.startTime) {
+        const date = new Date(session.startTime)
+        const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
+        if (monthsData[monthKey]) {
+          monthsData[monthKey].attended++
+        }
+      }
+    }
+    
+    // Count total sessions per month
+    for (const session of allSessions) {
+      if (session.startTime) {
+        const date = new Date(session.startTime)
+        const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
+        if (monthsData[monthKey]) {
+          monthsData[monthKey].total++
+        }
+      }
+    }
+    
+    // Format monthly data
+    Object.entries(monthsData).sort((a, b) => b[0].localeCompare(a[0])).forEach(([key, data]) => {
+      const percentage = data.total > 0 ? Math.round((data.attended / data.total) * 100) : 0
+      monthlyAttendance.push({
+        month: data.month.toLocaleDateString('en-US', { month: 'long', year: 'numeric' }),
+        monthShort: data.month.toLocaleDateString('en-US', { month: 'short' }),
+        attended: data.attended,
+        total: data.total,
+        missed: data.total - data.attended,
+        percentage
+      })
+    })
+    
+    return res.json({
+      // Overall stats
+      totalClasses: overallStats.total,
+      attendedClasses: overallStats.attended,
+      missedClasses: overallStats.missed,
+      attendancePercentage: overallStats.percentage,
+      status: overallStats.status,
+      
+      // Time-based stats
+      weeklyStats: {
+        attended: weekStats.attended,
+        total: weekStats.total,
+        percentage: weekStats.percentage
+      },
+      monthlyStats: {
+        attended: monthStats.attended,
+        total: monthStats.total,
+        percentage: monthStats.percentage
+      },
+      todayStats: {
+        attended: todayStats.attended,
+        total: todayStats.total,
+        percentage: todayStats.percentage
+      },
+      
+      // Detailed records
+      recentAttendance,
+      missedSessions: missedSessions.slice(0, 10),
+      monthlyAttendance,
+      
+      // Insights
+      trend: getTrend(weekStats.percentage, monthStats.percentage),
+      daysUntilCritical: calculateDaysUntilCritical(overallStats.percentage, overallStats.total)
+    })
+  } catch (error) {
+    console.error('Student stats error:', error)
+    return res.status(500).json({ error: 'internal_error' })
+  }
+})
+
+// Helper function to calculate days until attendance becomes critical
+function calculateDaysUntilCritical(currentPercentage, totalSessions) {
+  if (currentPercentage >= 75 || totalSessions === 0) {
+    return null // Not critical or no data
+  }
+  
+  // Calculate how many consecutive sessions needed to reach 75%
+  const requiredAttendance = Math.ceil(totalSessions * 0.75)
+  const currentAttendance = Math.floor(totalSessions * (currentPercentage / 100))
+  const sessionsNeeded = requiredAttendance - currentAttendance
+  
+  return sessionsNeeded > 0 ? sessionsNeeded : null
+}
+
+// Update student profile
+app.put('/students/:regNo', async (req, res) => {
+  try {
+    const { regNo } = req.params
+    const updates = req.body
+    
+    // Remove sensitive fields
+    delete updates.password
+    delete updates.regNo
+    
+    await updateStudent(regNo, updates)
+    const updated = await getStudentByRegNo(regNo)
+    
+    return res.json({ student: updated })
+  } catch (error) {
+    console.error('Update student error:', error)
+    return res.status(500).json({ error: 'internal_error' })
+  }
+})
+
+// Leave Management APIs
+
+// Get all leave requests (for staff)
+app.get('/leave/requests', async (req, res) => {
+  try {
+    const { status } = req.query
+    let requests
+    
+    if (status && status !== 'all') {
+      requests = await getLeaveRequestsByStatus(status)
+    } else {
+      requests = await getAllLeaveRequests()
+    }
+    
+    // Format the data
+    const formatted = requests.map(r => ({
+      id: r._id,
+      studentId: r.studentId,
+      studentName: r.studentName,
+      regNo: r.regNo,
+      startDate: r.startDate,
+      endDate: r.endDate,
+      reason: r.reason,
+      type: r.type,
+      status: r.status,
+      submittedAt: r.submittedAt,
+      reviewedBy: r.reviewedBy,
+      reviewedAt: r.reviewedAt,
+      duration: calculateDuration(r.startDate, r.endDate)
+    }))
+    
+    return res.json({ requests: formatted })
+  } catch (error) {
+    console.error('Get leave requests error:', error)
+    return res.status(500).json({ error: 'internal_error' })
+  }
+})
+
+// Get leave requests for a specific student
+app.get('/leave/student/:studentId', async (req, res) => {
+  try {
+    const { studentId } = req.params
+    const requests = await getLeaveRequestsByStudent(studentId)
+    
+    const formatted = requests.map(r => ({
+      id: r._id,
+      startDate: r.startDate,
+      endDate: r.endDate,
+      reason: r.reason,
+      type: r.type,
+      status: r.status,
+      submittedAt: r.submittedAt,
+      reviewedBy: r.reviewedBy,
+      reviewedAt: r.reviewedAt,
+      duration: calculateDuration(r.startDate, r.endDate)
+    }))
+    
+    return res.json({ requests: formatted })
+  } catch (error) {
+    console.error('Get student leave requests error:', error)
+    return res.status(500).json({ error: 'internal_error' })
+  }
+})
+
+// Create leave request
+app.post('/leave/request', async (req, res) => {
+  try {
+    const { studentId, studentName, regNo, startDate, endDate, reason, type } = req.body
+    
+    if (!studentId || !startDate || !endDate || !reason) {
+      return res.status(400).json({ error: 'missing_required_fields' })
+    }
+    
+    const leave = await createLeaveRequest({
+      studentId,
+      studentName: studentName || studentId,
+      regNo: regNo || studentId,
+      startDate,
+      endDate,
+      reason,
+      type: type || 'sick'
+    })
+    
+    return res.json({
+      success: true,
+      leave: {
+        id: leave._id,
+        ...leave
+      }
+    })
+  } catch (error) {
+    console.error('Create leave request error:', error)
+    return res.status(500).json({ error: 'internal_error' })
+  }
+})
+
+// Update leave status (approve/reject)
+app.put('/leave/request/:id/status', async (req, res) => {
+  try {
+    const { id } = req.params
+    const { status, reviewedBy } = req.body
+    
+    if (!['approved', 'rejected', 'pending'].includes(status)) {
+      return res.status(400).json({ error: 'invalid_status' })
+    }
+    
+    await updateLeaveStatus(id, status, reviewedBy || 'staff')
+    
+    return res.json({ success: true, status })
+  } catch (error) {
+    console.error('Update leave status error:', error)
+    return res.status(500).json({ error: 'internal_error' })
+  }
+})
+
+// Delete leave request
+app.delete('/leave/request/:id', async (req, res) => {
+  try {
+    const { id } = req.params
+    await deleteLeaveRequest(id)
+    return res.json({ success: true })
+  } catch (error) {
+    console.error('Delete leave request error:', error)
+    return res.status(500).json({ error: 'internal_error' })
+  }
+})
+
+// Admin Dashboard APIs
+
+// Get admin dashboard statistics
+app.get('/admin/dashboard/stats', async (req, res) => {
+  try {
+    const staffCount = await getStaffCount()
+    const studentCount = await getStudentCount()
+    const allAttendance = await getAllAttendanceRecords()
+    const allLeaves = await getAllLeaveRequests()
+    const allSessions = await getAllSessions()
+    
+    const pendingLeaves = allLeaves.filter(l => l.status === 'pending').length
+    const attendanceRecordsCount = allAttendance.length
+    
+    // Recent activities
+    const recentActivities = []
+    
+    // Add recent attendance marks
+    const recentAttendance = allAttendance.slice(-5).reverse()
+    const enrollments = await dbGetEnrollmentRecords('21CS701')
+    for (const record of recentAttendance) {
+      const enrollment = enrollments.find(e => e.studentId === record.studentId)
+      recentActivities.push({
+        type: 'attendance',
+        icon: '✅',
+        text: `${enrollment?.name || record.studentId} marked present`,
+        time: getTimeAgo(record.timestamp || Date.now()),
+        timestamp: record.timestamp || Date.now()
+      })
+    }
+    
+    // Add recent leave requests
+    const recentLeaves = allLeaves.slice(-5).reverse()
+    for (const leave of recentLeaves) {
+      recentActivities.push({
+        type: 'leave',
+        icon: leave.status === 'approved' ? '✅' : leave.status === 'rejected' ? '❌' : '⏳',
+        text: `Leave request from ${leave.studentName} - ${leave.status}`,
+        time: getTimeAgo(leave.submittedAt || Date.now()),
+        timestamp: leave.submittedAt || Date.now()
+      })
+    }
+    
+    // Sort by timestamp
+    recentActivities.sort((a, b) => b.timestamp - a.timestamp)
+    
+    // Today's stats
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    const todayStr = today.toISOString().split('T')[0]
+    
+    const todaySessions = allSessions.filter(s => {
+      if (!s.startTime) return false
+      const sessionDate = new Date(s.startTime).toISOString().split('T')[0]
+      return sessionDate === todayStr
+    })
+    
+    const todayAttendance = allAttendance.filter(a => {
+      const sessionIds = new Set(todaySessions.map(s => s.id))
+      return sessionIds.has(a.sessionId)
+    })
+    
+    return res.json({
+      staffCount,
+      studentCount,
+      attendanceRecordsCount,
+      pendingLeaves,
+      totalSessions: allSessions.length,
+      todaySessionsCount: todaySessions.length,
+      todayAttendanceCount: todayAttendance.length,
+      recentActivities: recentActivities.slice(0, 10),
+      stats: {
+        averageAttendanceRate: studentCount > 0 && allSessions.length > 0 
+          ? Math.round((allAttendance.length / (studentCount * allSessions.length)) * 100)
+          : 0
+      }
+    })
+  } catch (error) {
+    console.error('Admin dashboard stats error:', error)
+    return res.status(500).json({ error: 'internal_error' })
+  }
+})
+
+// Admin Staff Management APIs
+
+// Get all staff
+app.get('/admin/staff/list', async (req, res) => {
+  try {
+    const staff = await listStaff()
+    const staffList = staff.map(s => ({
+      id: s.id,
+      name: s.name,
+      email: s.email,
+      department: s.department || 'Not specified',
+      designation: s.designation || 'Staff',
+      contact: s.contact || '',
+      status: s.status || 'Active',
+      joiningDate: s.joiningDate || null
+    }))
+    return res.json({ staff: staffList })
+  } catch (error) {
+    console.error('Get staff list error:', error)
+    return res.status(500).json({ error: 'internal_error' })
+  }
+})
+
+// Add new staff
+app.post('/admin/staff/add', async (req, res) => {
+  try {
+    const { name, email, password, department, designation, contact } = req.body
+    
+    if (!name || !email || !password) {
+      return res.status(400).json({ error: 'missing_required_fields' })
+    }
+    
+    // Check if email already exists
+    const existing = await getStaffByEmail(email)
+    if (existing) {
+      return res.status(409).json({ error: 'email_already_exists' })
+    }
+    
+    const staff = await createStaff({
+      id: email,
+      name,
+      email,
+      password,
+      department: department || 'Computer Science',
+      designation: designation || 'Assistant Professor',
+      contact: contact || '',
+      status: 'Active',
+      joiningDate: Date.now()
+    })
+    
+    return res.json({ 
+      success: true, 
+      staff: { id: staff.id, name: staff.name, email: staff.email }
+    })
+  } catch (error) {
+    console.error('Add staff error:', error)
+    return res.status(500).json({ error: 'internal_error' })
+  }
+})
+
+// Update staff
+app.put('/admin/staff/:id', async (req, res) => {
+  try {
+    const { id } = req.params
+    const updates = req.body
+    
+    // Remove sensitive/immutable fields
+    delete updates.id
+    delete updates.email
+    delete updates.password
+    
+    const staff = await getStaffById(id)
+    if (!staff) {
+      return res.status(404).json({ error: 'staff_not_found' })
+    }
+    
+    await updateStaff(id, updates)
+    
+    return res.json({ success: true, message: 'Staff updated successfully' })
+  } catch (error) {
+    console.error('Update staff error:', error)
+    return res.status(500).json({ error: 'internal_error' })
+  }
+})
+
+// Delete staff
+app.delete('/admin/staff/:id', async (req, res) => {
+  try {
+    const { id } = req.params
+    
+    const staff = await getStaffById(id)
+    if (!staff) {
+      return res.status(404).json({ error: 'staff_not_found' })
+    }
+    
+    await deleteStaff(id)
+    
+    return res.json({ success: true, message: 'Staff deleted successfully' })
+  } catch (error) {
+    console.error('Delete staff error:', error)
+    return res.status(500).json({ error: 'internal_error' })
+  }
+})
+
+// Reset staff password
+app.post('/admin/staff/:id/reset-password', async (req, res) => {
+  try {
+    const { id } = req.params
+    const { newPassword } = req.body
+    
+    if (!newPassword || newPassword.length < 6) {
+      return res.status(400).json({ error: 'invalid_password' })
+    }
+    
+    const staff = await getStaffById(id)
+    if (!staff) {
+      return res.status(404).json({ error: 'staff_not_found' })
+    }
+    
+    await updateStaff(id, { password: newPassword })
+    
+    return res.json({ success: true, message: 'Password reset successfully' })
+  } catch (error) {
+    console.error('Reset password error:', error)
+    return res.status(500).json({ error: 'internal_error' })
+  }
+})
+
+// Admin Student Management APIs (additional to existing)
+
+// Delete student
+app.delete('/admin/students/:regNo', async (req, res) => {
+  try {
+    const { regNo } = req.params
+    
+    const student = await dbGetStudentByRegNo(regNo)
+    if (!student) {
+      return res.status(404).json({ error: 'student_not_found' })
+    }
+    
+    await deleteStudent(regNo)
+    
+    return res.json({ success: true, message: 'Student deleted successfully' })
+  } catch (error) {
+    console.error('Delete student error:', error)
+    return res.status(500).json({ error: 'internal_error' })
+  }
+})
+
+// Reset student password
+app.post('/admin/students/:regNo/reset-password', async (req, res) => {
+  try {
+    const { regNo } = req.params
+    const { newPassword } = req.body
+    
+    if (!newPassword || newPassword.length < 6) {
+      return res.status(400).json({ error: 'invalid_password' })
+    }
+    
+    const student = await dbGetStudentByRegNo(regNo)
+    if (!student) {
+      return res.status(404).json({ error: 'student_not_found' })
+    }
+    
+    await dbUpdateStudentPassword(regNo, newPassword)
+    
+    return res.json({ success: true, message: 'Password reset successfully' })
+  } catch (error) {
+    console.error('Reset student password error:', error)
+    return res.status(500).json({ error: 'internal_error' })
+  }
+})
+
+// System Settings APIs
+
+// Get system settings
+app.get('/admin/settings', async (req, res) => {
+  try {
+    const settings = await getSystemSettings()
+    return res.json({ settings })
+  } catch (error) {
+    console.error('Get settings error:', error)
+    return res.status(500).json({ error: 'internal_error' })
+  }
+})
+
+// Update system settings
+app.put('/admin/settings', async (req, res) => {
+  try {
+    const updates = req.body
+    await updateSystemSettings(updates)
+    const settings = await getSystemSettings()
+    return res.json({ success: true, settings, message: 'Settings updated successfully' })
+  } catch (error) {
+    console.error('Update settings error:', error)
+    return res.status(500).json({ error: 'internal_error' })
+  }
+})
+
+// Department Navigation APIs
+app.get('/admin/departments/summary', async (req, res) => {
+  try {
+    const allStudents = await listAllStudents()
+    const allStaff = await listStaff()
+    
+    // Group by department and year
+    const departments = {}
+    
+    // Process students
+    for (const student of allStudents) {
+      const dept = student.department || 'M.Tech'
+      const year = student.year || '4th Year'
+      
+      if (!departments[dept]) {
+        departments[dept] = {
+          name: dept,
+          students: { total: 0, byYear: {} },
+          staff: { total: 0 }
+        }
+      }
+      
+      if (!departments[dept].students.byYear[year]) {
+        departments[dept].students.byYear[year] = 0
+      }
+      
+      departments[dept].students.total++
+      departments[dept].students.byYear[year]++
+    }
+    
+    // Process staff
+    for (const staff of allStaff) {
+      const dept = staff.department || 'Computer Science'
+      
+      if (!departments[dept]) {
+        departments[dept] = {
+          name: dept,
+          students: { total: 0, byYear: {} },
+          staff: { total: 0 }
+        }
+      }
+      
+      departments[dept].staff.total++
+    }
+    
+    return res.json({ departments: Object.values(departments) })
+  } catch (error) {
+    console.error('Department summary error:', error)
+    return res.status(500).json({ error: 'internal_error' })
+  }
+})
+
+// Get students by department and year
+app.get('/admin/students/by-department', async (req, res) => {
+  try {
+    const { department, year } = req.query
+    const allStudents = await listAllStudents()
+    
+    let filtered = allStudents
+    if (department && department !== 'All') {
+      filtered = filtered.filter(s => (s.department || 'M.Tech') === department)
+    }
+    if (year && year !== 'All') {
+      filtered = filtered.filter(s => (s.year || '4th Year') === year)
+    }
+    
+    // Sort by student ID in ascending order
+    filtered.sort((a, b) => {
+      const idA = a.studentId || a.regNo
+      const idB = b.studentId || b.regNo
+      return idA.localeCompare(idB, undefined, { numeric: true })
+    })
+    
+    return res.json({ 
+      students: filtered.map(s => ({
+        ...s,
+        department: s.department || 'M.Tech',
+        year: s.year || '4th Year'
+      })),
+      count: filtered.length 
+    })
+  } catch (error) {
+    console.error('Get students by department error:', error)
+    return res.status(500).json({ error: 'internal_error' })
+  }
+})
+
+// Get staff by department
+app.get('/admin/staff/by-department', async (req, res) => {
+  try {
+    const { department } = req.query
+    const allStaff = await listStaff()
+    
+    let filtered = allStaff
+    if (department && department !== 'All') {
+      filtered = filtered.filter(s => (s.department || 'Computer Science') === department)
+    }
+    
+    return res.json({ 
+      staff: filtered,
+      count: filtered.length 
+    })
+  } catch (error) {
+    console.error('Get staff by department error:', error)
+    return res.status(500).json({ error: 'internal_error' })
+  }
+})
+
+// Attendance Reports API
+app.get('/admin/attendance/reports', async (req, res) => {
+  try {
+    const { startDate, endDate, courseId } = req.query
+    const allAttendance = await getAllAttendanceRecords()
+    const allSessions = await getAllSessions()
+    const enrollments = await dbGetEnrollmentRecords('21CS701')
+    
+    let filteredSessions = allSessions
+    
+    // Filter by date range if provided
+    if (startDate && endDate) {
+      const start = new Date(startDate).getTime()
+      const end = new Date(endDate).getTime()
+      filteredSessions = allSessions.filter(s => {
+        if (!s.startTime) return false
+        const sessionTime = new Date(s.startTime).getTime()
+        return sessionTime >= start && sessionTime <= end
+      })
+    }
+    
+    // Filter by course if provided
+    if (courseId && courseId !== 'all') {
+      filteredSessions = filteredSessions.filter(s => s.courseId === courseId)
+    }
+    
+    const sessionIds = new Set(filteredSessions.map(s => s.id))
+    const filteredAttendance = allAttendance.filter(a => sessionIds.has(a.sessionId))
+    
+    // Generate report data
+    const reportData = []
+    for (const session of filteredSessions) {
+      const sessionAttendance = filteredAttendance.filter(a => a.sessionId === session.id)
+      const presentCount = sessionAttendance.length
+      const totalStudents = enrollments.length
+      const absentCount = totalStudents - presentCount
+      const percentage = totalStudents > 0 ? Math.round((presentCount / totalStudents) * 100) : 0
+      
+      reportData.push({
+        sessionId: session.id,
+        courseId: session.courseId || 'Unknown',
+        date: new Date(session.startTime).toLocaleDateString(),
+        time: new Date(session.startTime).toLocaleTimeString(),
+        present: presentCount,
+        absent: absentCount,
+        total: totalStudents,
+        percentage
+      })
+    }
+    
+    return res.json({ 
+      reports: reportData,
+      summary: {
+        totalSessions: filteredSessions.length,
+        totalAttendanceRecords: filteredAttendance.length,
+        averageAttendance: reportData.length > 0 
+          ? Math.round(reportData.reduce((sum, r) => sum + r.percentage, 0) / reportData.length)
+          : 0
+      }
+    })
+  } catch (error) {
+    console.error('Attendance reports error:', error)
+    return res.status(500).json({ error: 'internal_error' })
+  }
+})
+
+// Helper function to calculate duration
+function calculateDuration(startDate, endDate) {
+  const start = new Date(startDate)
+  const end = new Date(endDate)
+  const diffTime = Math.abs(end - start)
+  const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1 // +1 to include both start and end days
+  
+  if (diffDays === 1) return '1 day'
+  return `${diffDays} days`
+}
 
 // Serve frontend build (same-origin) if available
 const __dirname = path.dirname(fileURLToPath(import.meta.url))

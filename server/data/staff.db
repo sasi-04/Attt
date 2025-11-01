@@ -1,2 +1,2 @@
-{"id":"staff@demo.com","name":"Demo Staff","email":"staff@demo.com","password":"staff123","_id":"NvYBrb6N0PzES12k"}
-{"id":"kiruthika@demo.com","name":"Kiruthika","email":"kiruthika@demo.com","password":"kiruthika123","_id":"THDGNGpYSKzLHgyo"}
+{"id":"staff@demo.com","name":"Demo Staff","email":"staff@demo.com","password":"staff123","_id":"NvYBrb6N0PzES12k","department":"M.Tech","designation":"Assistant Professor","contact":"9876543210"}
+{"id":"kiruthika@demo.com","name":"Kiruthika","email":"kiruthika@demo.com","password":"kiruthika@123","_id":"THDGNGpYSKzLHgyo"}

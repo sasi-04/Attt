@@ -1,8 +1,8 @@
 import React from 'react'
-import StudentTable from '../../components/StudentTable.jsx'
+import HierarchicalStudentView from '../../components/HierarchicalStudentView.jsx'
 
 export default function ManageStudents(){
-  return <StudentTable />
+  return <HierarchicalStudentView />
 }
 
 

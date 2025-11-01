@@ -55,7 +55,11 @@ export async function getJtiByCode(code){
 }
 
 export function markPresent(sessionId, studentId){
-  return presentsDb.update({ sessionId, studentId }, { $set: { sessionId, studentId } }, { upsert: true })
+  return presentsDb.update(
+    { sessionId, studentId }, 
+    { $set: { sessionId, studentId, timestamp: Date.now() } }, 
+    { upsert: true }
+  )
 }
 
 export async function getPresentCount(sessionId){
@@ -112,6 +116,23 @@ export async function getStaffByEmail(email){
   return staffDb.findOne({ email: String(email).toLowerCase() })
 }
 
+// Additional staff management functions
+export async function getStaffById(id){
+  return staffDb.findOne({ id })
+}
+
+export async function updateStaff(id, updates){
+  return staffDb.update({ id }, { $set: updates })
+}
+
+export async function deleteStaff(id){
+  return staffDb.remove({ id }, { multi: false })
+}
+
+export async function getStaffCount(){
+  return staffDb.count({})
+}
+
 // Students auth store
 export async function createStudent({ regNo, studentId, name, password }){
   const doc = { regNo: String(regNo), studentId, name, password }
@@ -127,4 +148,131 @@ export async function updateStudentPassword(regNo, newPassword){
   return studentsDb.update({ regNo: String(regNo) }, { $set: { password: newPassword } })
 }
 
+export async function listAllStudents(){
+  return studentsDb.find({})
+}
 
+export async function updateStudent(regNo, updates){
+  return studentsDb.update({ regNo: String(regNo) }, { $set: updates })
+}
+
+// Additional student management functions
+export async function deleteStudent(regNo){
+  return studentsDb.remove({ regNo: String(regNo) }, { multi: false })
+}
+
+export async function getStudentCount(){
+  return studentsDb.count({})
+}
+
+// Get attendance records for a specific student
+export async function getStudentAttendance(studentId){
+  return presentsDb.find({ studentId })
+}
+
+// Get all attendance records
+export async function getAllAttendanceRecords(){
+  return presentsDb.find({})
+}
+
+// Get session by ID
+export async function getSessionById(sessionId){
+  return sessionsDb.findOne({ id: sessionId })
+}
+
+// Get all sessions
+export async function getAllSessions(){
+  return sessionsDb.find({})
+}
+
+// Leave management
+let leavesDb
+export function initLeavesDb() {
+  if (!leavesDb) {
+    leavesDb = Datastore.create({ filename: path.resolve(__dirname, 'data/leaves.db'), autoload: true })
+  }
+  return leavesDb
+}
+
+export async function createLeaveRequest({ studentId, studentName, regNo, startDate, endDate, reason, type }) {
+  initLeavesDb()
+  const leave = {
+    studentId,
+    studentName,
+    regNo,
+    startDate,
+    endDate,
+    reason,
+    type: type || 'sick',
+    status: 'pending',
+    submittedAt: Date.now(),
+    updatedAt: Date.now()
+  }
+  return leavesDb.insert(leave)
+}
+
+export async function getAllLeaveRequests() {
+  initLeavesDb()
+  return leavesDb.find({}).sort({ submittedAt: -1 })
+}
+
+export async function getLeaveRequestsByStudent(studentId) {
+  initLeavesDb()
+  return leavesDb.find({ studentId }).sort({ submittedAt: -1 })
+}
+
+export async function getLeaveRequestsByStatus(status) {
+  initLeavesDb()
+  return leavesDb.find({ status }).sort({ submittedAt: -1 })
+}
+
+export async function updateLeaveStatus(leaveId, status, reviewedBy) {
+  initLeavesDb()
+  return leavesDb.update(
+    { _id: leaveId },
+    { $set: { status, reviewedBy, reviewedAt: Date.now(), updatedAt: Date.now() } }
+  )
+}
+
+export async function deleteLeaveRequest(leaveId) {
+  initLeavesDb()
+  return leavesDb.remove({ _id: leaveId })
+}
+
+// System settings management
+let settingsDb
+export function initSettingsDb() {
+  if (!settingsDb) {
+    settingsDb = Datastore.create({ filename: path.resolve(__dirname, 'data/settings.db'), autoload: true })
+  }
+  return settingsDb
+}
+
+export async function getSystemSettings() {
+  initSettingsDb()
+  const settings = await settingsDb.findOne({ type: 'system' })
+  if (!settings) {
+    // Return default settings
+    return {
+      type: 'system',
+      institutionName: 'Demo College',
+      academicYear: '2024-2025',
+      semesterStart: '2024-08-01',
+      semesterEnd: '2024-12-31',
+      departments: ['Computer Science', 'Electrical Engineering', 'Mechanical Engineering'],
+      minimumAttendance: 75,
+      notificationsEnabled: true,
+      emailNotifications: false
+    }
+  }
+  return settings
+}
+
+export async function updateSystemSettings(updates) {
+  initSettingsDb()
+  return settingsDb.update(
+    { type: 'system' },
+    { $set: { ...updates, type: 'system', updatedAt: Date.now() } },
+    { upsert: true }
+  )
+}

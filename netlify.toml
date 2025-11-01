@@ -4,13 +4,13 @@
 
 [[redirects]]
   from = "/api/*"
-  to = "https://https://attendancesystem-8hfa.onrender.com/:splat"
+  to = "https://attendancesystem-8hfa.onrender.com/:splat"
   status = 200
   force = true
 
 [[redirects]]
   from = "/socket.io/*"
-  to = "https://https://attendancesystem-8hfa.onrender.com/socket.io/:splat"
+  to = "https://attendancesystem-8hfa.onrender.com/socket.io/:splat"
   status = 200
   force = true
   headers = { Connection = "upgrade" }

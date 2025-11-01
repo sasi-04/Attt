@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test API Response</title>
+    <style>
+        body { font-family: Arial; padding: 20px; }
+        .student { padding: 10px; border-bottom: 1px solid #ccc; }
+        button { padding: 10px 20px; margin: 10px 0; background: #4CAF50; color: white; border: none; cursor: pointer; }
+        button:hover { background: #45a049; }
+    </style>
+</head>
+<body>
+    <h1>Student Data Test</h1>
+    <button onclick="loadStudents()">Load Students from API</button>
+    <div id="count"></div>
+    <div id="students"></div>
+
+    <script>
+        async function loadStudents() {
+            try {
+                const response = await fetch('http://localhost:5174/students/list');
+                const data = await response.json();
+                
+                document.getElementById('count').innerHTML = `<h2>Total Students: ${data.students.length}</h2>`;
+                
+                const html = data.students.map((s, i) => `
+                    <div class="student">
+                        <strong>${i + 1}. ${s.studentId}</strong> - ${s.name} (${s.regNo})
+                    </div>
+                `).join('');
+                
+                document.getElementById('students').innerHTML = html;
+            } catch (error) {
+                document.getElementById('students').innerHTML = `<p style="color:red">Error: ${error.message}</p>`;
+            }
+        }
+    </script>
+</body>
+</html>

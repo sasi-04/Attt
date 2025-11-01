@@ -19,75 +19,13 @@ export default function StudentDashboard() {
       if (!user?.regNo && !user?.studentId) return
       
       try {
-        // Simulate API calls - replace with actual endpoints
         const studentId = user.regNo || user.studentId
         
-        // Get student's attendance summary (semester data)
-        const attendanceSummary = {
-          totalClasses: 68, // Total classes from Aug-Oct 2024
-          attendedClasses: 62,
-          missedClasses: 6,
-          attendancePercentage: Math.round((62 / 68) * 100) // 91%
-        }
-        
-        // Get recent attendance records (past dates)
-        const pastDates = [
-          new Date('2024-10-28'),
-          new Date('2024-10-25'),
-          new Date('2024-10-24'),
-          new Date('2024-10-23'),
-          new Date('2024-10-22')
-        ]
-        
-        const recentAttendance = [
-          { 
-            date: pastDates[0].toISOString().split('T')[0], 
-            subject: 'Computer Networks', 
-            time: '08:45 AM', 
-            status: 'Present',
-            sessionId: 'S_' + pastDates[0].getTime()
-          },
-          { 
-            date: pastDates[1].toISOString().split('T')[0], 
-            subject: 'Database Systems', 
-            time: '10:30 AM', 
-            status: 'Present',
-            sessionId: 'S_' + pastDates[1].getTime()
-          },
-          { 
-            date: pastDates[2].toISOString().split('T')[0], 
-            subject: 'Software Engineering', 
-            time: '02:15 PM', 
-            status: 'Absent',
-            sessionId: 'S_' + pastDates[2].getTime()
-          },
-          { 
-            date: pastDates[3].toISOString().split('T')[0], 
-            subject: 'Operating Systems', 
-            time: '11:00 AM', 
-            status: 'Present',
-            sessionId: 'S_' + pastDates[3].getTime()
-          },
-          { 
-            date: pastDates[4].toISOString().split('T')[0], 
-            subject: 'Data Structures', 
-            time: '09:15 AM', 
-            status: 'Present',
-            sessionId: 'S_' + pastDates[4].getTime()
-          }
-        ]
-        
-        // Get monthly attendance (past months)
-        const monthlyAttendance = [
-          { month: 'October 2024', attended: 20, total: 22, percentage: Math.round((20/22) * 100) },
-          { month: 'September 2024', attended: 18, total: 20, percentage: Math.round((18/20) * 100) },
-          { month: 'August 2024', attended: 15, total: 18, percentage: Math.round((15/18) * 100) },
-        ]
+        // Fetch real data from API
+        const data = await apiGet(`/student/${studentId}/stats`)
         
         setAttendanceData({
-          ...attendanceSummary,
-          recentAttendance,
-          monthlyAttendance,
+          ...data,
           loading: false
         })
         

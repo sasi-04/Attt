@@ -1,12 +1,14 @@
 import React from 'react'
 import { motion } from 'framer-motion'
 
-export default function TeachingDetails(){
+export default function TeachingDetails({ profile }){
+  if (!profile) return null
+  
   const details = [
-    { icon: '🎓', title: 'Academic Qualifications', items: ['Ph.D. in Computer Science', 'M.Sc. in Software Engineering'] },
-    { icon: '⌛', title: 'Experience', items: ['8 years'] },
-    { icon: '🏅', title: 'Designation', items: ['Associate Professor'] },
-    { icon: '📚', title: 'Teaching Subjects', items: ['Database Systems', 'Compiler Design', 'Software Engineering'] },
+    { icon: '🎓', title: 'Academic Qualifications', items: profile.qualifications || ['Not specified'] },
+    { icon: '⌛', title: 'Experience', items: [profile.experience || 'Not specified'] },
+    { icon: '🏅', title: 'Designation', items: [profile.designation || 'Not specified'] },
+    { icon: '📚', title: 'Teaching Subjects', items: profile.teachingSubjects || ['Not specified'] },
   ]
 
   return (

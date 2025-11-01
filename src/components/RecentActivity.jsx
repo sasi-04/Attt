@@ -1,14 +1,17 @@
 import React from 'react'
 import { motion } from 'framer-motion'
 
-const items = [
-  { icon: '✅', text: 'Marked attendance for CS-301', time: '2 hours ago' },
-  { icon: '✅', text: 'Approved leave request from Alex Johnson', time: '4 hours ago' },
-  { icon: '🎓', text: 'Conducted Database Systems lecture', time: '1 day ago' },
-  { icon: '❌', text: 'Rejected leave request (insufficient documentation)', time: '2 days ago' },
-]
-
-export default function RecentActivity(){
+export default function RecentActivity({ activities }){
+  if (!activities || activities.length === 0) {
+    return (
+      <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.35 }} className="bg-white shadow-md rounded-xl p-6 mb-6">
+        <h2 className="text-xl font-semibold text-gray-700 mb-4">Recent Activity</h2>
+        <p className="text-gray-500 text-center py-4">No recent activity</p>
+      </motion.div>
+    )
+  }
+  
+  const items = activities
   return (
     <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.35 }} className="bg-white shadow-md rounded-xl p-6 mb-6">
       <h2 className="text-xl font-semibold text-gray-700 mb-4">Recent Activity</h2>
@@ -22,6 +25,7 @@ export default function RecentActivity(){
                 <span className="select-none">{it.icon}</span>
               </div>
               <div className="text-gray-800">{it.text}</div>
+              {it.course && <div className="text-xs text-indigo-600">{it.course}</div>}
               <div className="text-xs text-gray-500">{it.time}</div>
             </motion.li>
           ))}

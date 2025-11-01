@@ -1,8 +1,8 @@
 import React from 'react'
-import StaffTable from '../../components/StaffTable.jsx'
+import HierarchicalStaffView from '../../components/HierarchicalStaffView.jsx'
 
 export default function ManageStaff(){
-  return <StaffTable />
+  return <HierarchicalStaffView />
 }
 
 

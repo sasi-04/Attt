@@ -4,13 +4,16 @@ import { motion } from 'framer-motion'
 
 const COLORS = ['#ef4444','#f59e0b','#eab308','#22c55e','#3b82f6']
 
-export default function AttendancePieChart(){
-  const data = [
-    { name: '<60%', value: 5 },
-    { name: '60–69%', value: 12 },
-    { name: '70–79%', value: 18 },
-    { name: '80–89%', value: 30 },
-    { name: '90–100%', value: 35 },
+export default function AttendancePieChart({ data }){
+  // Use provided data or fallback to demo data
+  const chartData = data ? [
+    { name: 'Present', value: data.present || 0 },
+    { name: 'Absent', value: data.absent || 0 },
+    { name: 'On Leave', value: data.onLeave || 0 },
+  ].filter(item => item.value > 0) : [
+    { name: 'Present', value: 85 },
+    { name: 'Absent', value: 12 },
+    { name: 'On Leave', value: 3 },
   ]
 
   return (
@@ -19,8 +22,8 @@ export default function AttendancePieChart(){
       <div style={{ width: '100%', height: 320 }}>
         <ResponsiveContainer>
           <PieChart>
-            <Pie data={data} dataKey="value" cx="50%" cy="50%" outerRadius={110} isAnimationActive>
-              {data.map((entry, index) => (
+            <Pie data={chartData} dataKey="value" cx="50%" cy="50%" outerRadius={110} isAnimationActive>
+              {chartData.map((entry, index) => (
                 <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
               ))}
             </Pie>
