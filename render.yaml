@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: attendance-system
+    runtime: node
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: JWT_SECRET
+        sync: false  # This will be set manually in Render dashboard

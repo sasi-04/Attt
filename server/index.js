@@ -1786,7 +1786,7 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(distPath, 'index.html'))
 })
 
-const PORT = process.env.PORT || 5174
+const PORT = process.env.PORT || 3001
 const HOST = process.env.HOST || '0.0.0.0'
 server.listen(PORT, HOST, () => console.log(`Attendance server (API + SPA) on http://${HOST}:${PORT}`))
 
