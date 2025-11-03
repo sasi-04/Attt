@@ -1,5 +1,6 @@
-import React, { useState, useEffect, useMemo } from 'react'
-import { apiGet, adminApi } from './api.js'
+import React, { useState, useEffect, useMemo, useCallback } from 'react'
+import { adminApi } from './api.js'
+import { useDepartmentUpdates, useStudentUpdates } from '../hooks/useWebSocket.js'
 
 export default function HierarchicalStudentView() {
   const [viewLevel, setViewLevel] = useState('departments') // 'departments', 'years', 'students'
@@ -17,37 +18,237 @@ export default function HierarchicalStudentView() {
   const [query, setQuery] = useState('')
   const [minAtt, setMinAtt] = useState(0)
   const [maxAtt, setMaxAtt] = useState(100)
-  const [showAddDeptModal, setShowAddDeptModal] = useState(false)
   const [showAddYearModal, setShowAddYearModal] = useState(false)
+  const [selectedYears, setSelectedYears] = useState([])
+  const [showBulkDeleteYearModal, setShowBulkDeleteYearModal] = useState(false)
   const [showAddStudentModal, setShowAddStudentModal] = useState(false)
-  const [showDeleteDeptModal, setShowDeleteDeptModal] = useState(false)
-  const [showDeleteYearModal, setShowDeleteYearModal] = useState(false)
-  const [deptToDelete, setDeptToDelete] = useState(null)
-  const [yearToDelete, setYearToDelete] = useState(null)
-  const [newDeptName, setNewDeptName] = useState('')
+  const [addStudentTab, setAddStudentTab] = useState('manual') // 'manual' or 'csv'
+  const [csvFile, setCsvFile] = useState(null)
+  const [csvPreview, setCsvPreview] = useState([])
+  const [hierarchyData, setHierarchyData] = useState({})
   const [newYear, setNewYear] = useState('')
   const [newStudent, setNewStudent] = useState({
     name: '',
     regNo: '',
     studentId: '',
     email: '',
-    password: 'student123'
+    password: ''
   })
 
   useEffect(() => {
     loadDepartments()
   }, [])
 
+  // Clear student form when modal closes
+  useEffect(() => {
+    if (!showAddStudentModal) {
+      setNewStudent({
+        name: '',
+        regNo: '',
+        studentId: '',
+        email: '',
+        password: ''
+      })
+      setAddStudentTab('manual')
+      setCsvFile(null)
+      setCsvPreview([])
+    }
+  }, [showAddStudentModal])
+
+  // Handle CSV file selection
+  const handleCsvFileChange = (e) => {
+    const file = e.target.files[0]
+    if (file && file.type === 'text/csv') {
+      setCsvFile(file)
+      parseCSV(file)
+    } else {
+      setMessage('Please select a valid CSV file')
+      setTimeout(() => setMessage(''), 3000)
+    }
+  }
+
+  // Parse CSV file
+  const parseCSV = (file) => {
+    const reader = new FileReader()
+    reader.onload = (e) => {
+      const text = e.target.result
+      const lines = text.split('\n').filter(line => line.trim())
+      
+      if (lines.length < 2) {
+        setMessage('CSV file must have at least a header row and one data row')
+        setTimeout(() => setMessage(''), 3000)
+        return
+      }
+      
+      const headers = lines[0].split(',').map(h => h.trim())
+      const expectedHeaders = ['name', 'regNo', 'studentId', 'email', 'password']
+      
+      // Check if headers match expected format
+      const hasValidHeaders = expectedHeaders.every(header => 
+        headers.some(h => h.toLowerCase() === header.toLowerCase())
+      )
+      
+      if (!hasValidHeaders) {
+        setMessage('CSV headers must include: name, regNo, studentId, email, password')
+        setTimeout(() => setMessage(''), 3000)
+        return
+      }
+      
+      // Parse data rows
+      const students = []
+      for (let i = 1; i < lines.length; i++) {
+        const values = lines[i].split(',').map(v => v.trim())
+        if (values.length === headers.length) {
+          const student = {}
+          headers.forEach((header, index) => {
+            student[header.toLowerCase()] = values[index]
+          })
+          students.push(student)
+        }
+      }
+      
+      setCsvPreview(students)
+      setMessage(`${students.length} students loaded from CSV`)
+      setTimeout(() => setMessage(''), 3000)
+    }
+    reader.readAsText(file)
+  }
+
+  // Download CSV template
+  const downloadCSVTemplate = () => {
+    const csvContent = 'name,regNo,studentId,email,password\nJohn Doe,ES22CJ01,ES22CJ01,john@example.com,student123\nJane Smith,ES22CJ02,ES22CJ02,jane@example.com,student123'
+    const blob = new Blob([csvContent], { type: 'text/csv' })
+    const url = window.URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'student_template.csv'
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    window.URL.revokeObjectURL(url)
+  }
+
+  // Handle bulk CSV upload
+  const handleBulkUpload = async () => {
+    if (csvPreview.length === 0) {
+      setMessage('No students to upload')
+      setTimeout(() => setMessage(''), 3000)
+      return
+    }
+    
+    try {
+      let successCount = 0
+      let errorCount = 0
+      
+      for (const student of csvPreview) {
+        try {
+          const studentData = {
+            ...student,
+            department: selectedDept.name,
+            year: selectedYear
+          }
+          await adminApi.createStudent(studentData)
+          successCount++
+        } catch (error) {
+          console.error(`Failed to add student ${student.name}:`, error)
+          errorCount++
+        }
+      }
+      
+      setMessage(`Successfully added ${successCount} students. ${errorCount > 0 ? `${errorCount} failed.` : ''}`)
+      
+      if (successCount > 0) {
+        // Remove year placeholder if it exists
+        const currentStudents = await adminApi.getStudentsByDepartment(selectedDept.name, selectedYear)
+        const yearPlaceholder = currentStudents.students.find(s => s.isYearPlaceholder)
+        if (yearPlaceholder) {
+          try {
+            await adminApi.deleteStudent(yearPlaceholder.regNo)
+          } catch (placeholderError) {
+            console.error('Failed to remove year placeholder:', placeholderError)
+          }
+        }
+        
+        setShowAddStudentModal(false)
+        loadStudents(selectedDept.name, selectedYear)
+      }
+      
+      setTimeout(() => setMessage(''), 5000)
+    } catch (error) {
+      setMessage('Failed to upload students')
+      setTimeout(() => setMessage(''), 3000)
+    }
+  }
+
+  // Handle real-time department updates
+  const handleDepartmentUpdate = useCallback((update) => {
+    console.log('Department update received in students:', update)
+    // Refresh departments when any department-related change occurs
+    loadDepartments()
+    // If we're viewing a specific department, refresh it
+    if (selectedDept) {
+      adminApi.getDepartmentsSummary().then(response => {
+        const updatedDept = response.departments.find(d => d.name === selectedDept.name)
+        if (updatedDept) {
+          setSelectedDept(updatedDept)
+        }
+      }).catch(error => {
+        console.error('Failed to refresh department:', error)
+      })
+    }
+    // Also refresh hierarchy data when staff assignments change
+    if (update.type === 'hierarchy-updated' || update.type === 'staff-created' || update.type === 'staff-updated') {
+      loadHierarchyData()
+    }
+  }, [selectedDept])
+
+  // Handle real-time student updates
+  const handleStudentUpdate = useCallback((update) => {
+    console.log('Student update received:', update)
+    // Refresh departments to update counts
+    loadDepartments()
+    // If we're viewing students for a specific department/year, refresh that too
+    if (selectedDept && selectedYear && viewLevel === 'students') {
+      loadStudents(selectedDept.name, selectedYear)
+    }
+  }, [selectedDept, selectedYear, viewLevel])
+
+  // Subscribe to WebSocket updates
+  useDepartmentUpdates(handleDepartmentUpdate)
+  useStudentUpdates(handleStudentUpdate)
+
   const loadDepartments = async () => {
     try {
       setLoading(true)
-      const response = await apiGet('/admin/departments/summary')
+      const response = await adminApi.getDepartmentsSummary()
       setDepartments(response.departments)
+      // Also load hierarchy data to show class advisors
+      await loadHierarchyData()
     } catch (error) {
       console.error('Failed to load departments:', error)
       setMessage('Failed to load departments')
     } finally {
       setLoading(false)
+    }
+  }
+
+  const loadHierarchyData = async () => {
+    try {
+      console.log('Loading hierarchy data for student management...')
+      const response = await fetch('/admin/hierarchy/structure')
+      const data = await response.json()
+      console.log('Hierarchy data response:', data)
+      
+      if (data && data.hierarchy && typeof data.hierarchy === 'object') {
+        console.log('Setting hierarchy data:', data.hierarchy)
+        setHierarchyData(data.hierarchy)
+      } else {
+        console.warn('Invalid hierarchy data format:', data)
+        setHierarchyData({})
+      }
+    } catch (error) {
+      console.error('Failed to load hierarchy data:', error)
+      setHierarchyData({})
     }
   }
 
@@ -58,7 +259,7 @@ export default function HierarchicalStudentView() {
       if (dept) params.append('department', dept)
       if (year) params.append('year', year)
       
-      const response = await apiGet(`/admin/students/by-department?${params.toString()}`)
+      const response = await adminApi.getStudentsByDepartment(dept, year)
       const mappedStudents = response.students.map(s => ({
         name: s.name,
         roll: s.regNo,
@@ -136,19 +337,6 @@ export default function HierarchicalStudentView() {
     }
   }
 
-  const handleAddDepartment = async (e) => {
-    e.preventDefault()
-    if (!newDeptName.trim()) {
-      setMessage('Please enter a department name')
-      setTimeout(() => setMessage(''), 3000)
-      return
-    }
-    setShowAddDeptModal(false)
-    setMessage(`✓ Department "${newDeptName}" is ready! Add students to this department to make it visible in the list.`)
-    setNewDeptName('')
-    setTimeout(() => setMessage(''), 7000)
-  }
-
   const handleAddYear = async (e) => {
     e.preventDefault()
     if (!newYear) {
@@ -156,10 +344,31 @@ export default function HierarchicalStudentView() {
       setTimeout(() => setMessage(''), 3000)
       return
     }
-    setShowAddYearModal(false)
-    setMessage(`✓ Year "${newYear}" is ready for ${selectedDept?.name}! Add students to this year to populate it.`)
-    setNewYear('')
-    setTimeout(() => setMessage(''), 7000)
+    
+    try {
+      const response = await adminApi.createYear(selectedDept.name, newYear)
+      
+      setShowAddYearModal(false)
+      setMessage(`✓ Year "${newYear}" created successfully for ${selectedDept?.name}! The year card is now available.`)
+      setNewYear('')
+      
+      // Refresh departments list to show the new year
+      await loadDepartments()
+      
+      // Re-select the department to refresh the year view
+      const updatedDepts = await adminApi.getDepartmentsSummary()
+      const updatedDept = updatedDepts.departments.find(d => d.name === selectedDept.name)
+      if (updatedDept) {
+        setSelectedDept(updatedDept)
+      }
+      
+      setTimeout(() => setMessage(''), 5000)
+    } catch (error) {
+      console.error('Year creation error:', error)
+      const errorMessage = error.response?.data?.error || error.message || 'Unknown error'
+      setMessage('Failed to create year: ' + errorMessage)
+      setTimeout(() => setMessage(''), 3000)
+    }
   }
 
   const handleAddStudent = async (e) => {
@@ -171,6 +380,19 @@ export default function HierarchicalStudentView() {
         year: selectedYear
       }
       await adminApi.createStudent(studentData)
+      
+      // Remove year placeholder if it exists
+      const currentStudents = await adminApi.getStudentsByDepartment(selectedDept.name, selectedYear)
+      const yearPlaceholder = currentStudents.students.find(s => s.isYearPlaceholder)
+      if (yearPlaceholder) {
+        try {
+          await adminApi.deleteStudent(yearPlaceholder.regNo)
+          console.log('Year placeholder removed:', yearPlaceholder.regNo)
+        } catch (placeholderError) {
+          console.error('Failed to remove year placeholder:', placeholderError)
+        }
+      }
+      
       setMessage('Student added successfully!')
       setShowAddStudentModal(false)
       setNewStudent({
@@ -178,7 +400,7 @@ export default function HierarchicalStudentView() {
         regNo: '',
         studentId: '',
         email: '',
-        password: 'student123'
+        password: ''
       })
       loadStudents(selectedDept.name, selectedYear)
       // Clear message after 3 seconds
@@ -189,51 +411,85 @@ export default function HierarchicalStudentView() {
     }
   }
 
-  const handleDeleteDepartment = async () => {
+  const handleBulkDeleteYears = async () => {
+    console.log('=== BULK DELETE YEARS START ===')
+    console.log('Selected years to delete:', selectedYears)
+    console.log('Department:', selectedDept.name)
+    
     try {
-      // Delete all students in this department
-      const response = await adminApi.getStudentsByDepartment(deptToDelete.name, null)
-      for (const student of response.students) {
-        await adminApi.deleteStudent(student.regNo)
+      let deletedCount = 0
+      let totalStudentsDeleted = 0
+      let totalPlaceholdersDeleted = 0
+      
+      for (const yearName of selectedYears) {
+        console.log(`--- Processing year: ${yearName} ---`)
+        console.log(`Department: ${selectedDept.name}`)
+        
+        try {
+          // Get ALL students for this department to find both regular students and year placeholders
+          const allStudentsResponse = await adminApi.getStudentsByDepartment(selectedDept.name, null)
+          const studentsToDelete = allStudentsResponse.students.filter(s => 
+            s.year === yearName && s.department === selectedDept.name
+          )
+          
+          console.log(`Found ${studentsToDelete.length} items to delete for year ${yearName}`)
+          
+          // Delete ALL students and placeholders for this year
+          for (const student of studentsToDelete) {
+            try {
+              await adminApi.deleteStudent(student.regNo)
+              if (student.isYearPlaceholder) {
+                totalPlaceholdersDeleted++
+                console.log(`✓ Deleted year placeholder for: ${yearName} (regNo: ${student.regNo})`)
+              } else {
+                totalStudentsDeleted++
+                console.log(`✓ Deleted student: ${student.name} (regNo: ${student.regNo})`)
+              }
+            } catch (studentError) {
+              console.error(`Failed to delete ${student.isYearPlaceholder ? 'year placeholder' : 'student'} ${student.name}:`, studentError)
+            }
+          }
+          
+          deletedCount++
+          console.log(`Successfully deleted entire year card: ${yearName} (${studentsToDelete.length} total items removed)`)
+          
+        } catch (yearError) {
+          console.error(`Failed to process year ${yearName}:`, yearError)
+        }
       }
       
-      setMessage(`Department "${deptToDelete.name}" and all its students deleted successfully!`)
-      setShowDeleteDeptModal(false)
-      setDeptToDelete(null)
+      setMessage(`${deletedCount} year card(s) completely deleted! (${totalStudentsDeleted} students + ${totalPlaceholdersDeleted} year cards removed)`)
+      console.log('=== BULK DELETE YEARS COMPLETED ===')
+      console.log(`Year cards deleted: ${deletedCount}`)
+      console.log(`Students removed: ${totalStudentsDeleted}`)
+      console.log(`Year placeholders removed: ${totalPlaceholdersDeleted}`)
+      console.log(`Total items deleted: ${totalStudentsDeleted + totalPlaceholdersDeleted}`)
+      setShowBulkDeleteYearModal(false)
+      setSelectedYears([])
       await loadDepartments()
-      setTimeout(() => setMessage(''), 3000)
-    } catch (error) {
-      setMessage('Failed to delete department: ' + (error.message || 'Unknown error'))
-      setShowDeleteDeptModal(false)
-      setTimeout(() => setMessage(''), 3000)
-    }
-  }
-
-  const handleDeleteYear = async () => {
-    try {
-      // Delete all students in this year
-      const response = await adminApi.getStudentsByDepartment(selectedDept.name, yearToDelete)
-      for (const student of response.students) {
-        await adminApi.deleteStudent(student.regNo)
-      }
       
-      setMessage(`Year "${yearToDelete}" and all its students deleted successfully!`)
-      setShowDeleteYearModal(false)
-      setYearToDelete(null)
-      // Reload department summary
-      await loadDepartments()
       // Re-select the department to refresh the year view
-      const updatedDepts = await apiGet('/admin/departments/summary')
+      const updatedDepts = await adminApi.getDepartmentsSummary()
       const updatedDept = updatedDepts.departments.find(d => d.name === selectedDept.name)
       if (updatedDept) {
         setSelectedDept(updatedDept)
       }
-      setTimeout(() => setMessage(''), 3000)
+      
+      setTimeout(() => setMessage(''), 5000)
     } catch (error) {
-      setMessage('Failed to delete year: ' + (error.message || 'Unknown error'))
-      setShowDeleteYearModal(false)
+      console.error('Bulk delete years error:', error)
+      setMessage('Failed to delete years: ' + (error.message || 'Unknown error'))
+      setShowBulkDeleteYearModal(false)
       setTimeout(() => setMessage(''), 3000)
     }
+  }
+
+  const toggleYearSelection = (yearName) => {
+    setSelectedYears(prev => 
+      prev.includes(yearName) 
+        ? prev.filter(name => name !== yearName)
+        : [...prev, yearName]
+    )
   }
 
   const filteredStudents = useMemo(() => {
@@ -261,18 +517,10 @@ export default function HierarchicalStudentView() {
     return (
       <div className="space-y-6">
         <div className="bg-white rounded-xl shadow-md p-6">
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <h2 className="text-2xl font-bold mb-2">Select Department</h2>
-              <p className="text-gray-600">Choose a department to view students by year</p>
-            </div>
-            <button
-              onClick={() => setShowAddDeptModal(true)}
-              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex items-center gap-2"
-            >
-              <span className="text-xl">+</span>
-              <span>Add Department</span>
-            </button>
+          <div className="mb-4">
+            <h2 className="text-2xl font-bold mb-2">Select Department</h2>
+            <p className="text-gray-600">Choose a department to view students by year</p>
+            <p className="text-sm text-blue-600 mt-1">💡 Tip: New departments can be created from the Staff Management page</p>
           </div>
 
           {message && (
@@ -285,20 +533,10 @@ export default function HierarchicalStudentView() {
             {departments.map(dept => (
               <div
                 key={dept.name}
-                className="bg-gradient-to-br from-blue-50 to-indigo-50 rounded-xl p-6 cursor-pointer hover:shadow-xl transition-all duration-300 border-2 border-transparent hover:border-indigo-500 transform hover:scale-105 relative"
+                onClick={() => handleDepartmentClick(dept)}
+                className="bg-gradient-to-br from-blue-50 to-indigo-50 rounded-xl p-6 cursor-pointer hover:shadow-xl transition-all duration-300 border-2 border-transparent hover:border-indigo-500 transform hover:scale-105"
               >
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    setDeptToDelete(dept)
-                    setShowDeleteDeptModal(true)
-                  }}
-                  className="absolute top-2 right-2 w-8 h-8 flex items-center justify-center bg-red-500 hover:bg-red-600 text-white rounded-full text-sm z-10"
-                  title="Delete Department"
-                >
-                  ×
-                </button>
-                <div onClick={() => handleDepartmentClick(dept)}>
+                <div>
                   <div className="flex items-center justify-between mb-4">
                     <h3 className="text-xl font-bold text-gray-800">{dept.name}</h3>
                     <span className="text-4xl">🎓</span>
@@ -334,50 +572,6 @@ export default function HierarchicalStudentView() {
           </div>
         </div>
 
-        {/* Add Department Modal */}
-        {showAddDeptModal && (
-          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => { setShowAddDeptModal(false); setMessage(''); }}>
-            <div className="bg-white rounded-xl shadow-2xl p-6 max-w-md w-full mx-4" onClick={(e) => e.stopPropagation()}>
-              <h2 className="text-xl font-bold mb-4">Add New Department</h2>
-              <p className="text-sm text-gray-600 mb-4">
-                ℹ️ Note: Departments appear automatically when you add students. Enter the department name you want to use when adding students.
-              </p>
-              <form onSubmit={handleAddDepartment} className="space-y-3">
-                <input
-                  type="text"
-                  placeholder="Department Name (e.g., Computer Science)"
-                  value={newDeptName}
-                  onChange={(e) => setNewDeptName(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-lg"
-                  required
-                />
-                <div className="flex gap-2 justify-end">
-                  <button type="button" onClick={() => { setShowAddDeptModal(false); setMessage(''); }} className="px-4 py-2 bg-gray-200 rounded-lg">Cancel</button>
-                  <button type="submit" className="px-4 py-2 bg-blue-600 text-white rounded-lg">Continue</button>
-                </div>
-              </form>
-            </div>
-          </div>
-        )}
-
-        {/* Delete Department Modal */}
-        {showDeleteDeptModal && deptToDelete && (
-          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => { setShowDeleteDeptModal(false); setDeptToDelete(null); }}>
-            <div className="bg-white rounded-xl shadow-2xl p-6 max-w-md w-full mx-4" onClick={(e) => e.stopPropagation()}>
-              <h2 className="text-xl font-bold mb-4 text-red-600">⚠️ Delete Department</h2>
-              <p className="mb-4 text-gray-700">
-                Are you sure you want to delete <strong>{deptToDelete.name}</strong>?
-              </p>
-              <div className="mb-4 p-3 bg-red-50 text-red-800 rounded-lg text-sm">
-                <strong>Warning:</strong> This will delete all {deptToDelete.students.total} students and {deptToDelete.staff.total} staff members in this department!
-              </div>
-              <div className="flex gap-2 justify-end">
-                <button onClick={() => { setShowDeleteDeptModal(false); setDeptToDelete(null); }} className="px-4 py-2 bg-gray-200 rounded-lg hover:bg-gray-300">Cancel</button>
-                <button onClick={handleDeleteDepartment} className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700">Delete Department</button>
-              </div>
-            </div>
-          </div>
-        )}
       </div>
     )
   }
@@ -387,7 +581,7 @@ export default function HierarchicalStudentView() {
     // Define year order
     const yearOrder = ['1st Year', '2nd Year', '3rd Year', '4th Year', '5th Year']
     
-    // Get years from data (only show years that have students)
+    // Get years from data (show all years including empty ones)
     let years = Object.keys(selectedDept.students.byYear)
     
     // Sort years according to the defined order
@@ -415,13 +609,33 @@ export default function HierarchicalStudentView() {
               <h2 className="text-2xl font-bold mb-2">{selectedDept.name}</h2>
               <p className="text-gray-600">Select a year to view students</p>
             </div>
-            <button
-              onClick={() => setShowAddYearModal(true)}
-              className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors flex items-center gap-2"
-            >
-              <span className="text-xl">+</span>
-              <span>Add Year</span>
-            </button>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setShowAddYearModal(true)}
+                className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors flex items-center gap-2"
+              >
+                <span className="text-xl">+</span>
+                <span>Add Year</span>
+              </button>
+              <button
+                onClick={() => setShowBulkDeleteYearModal(true)}
+                disabled={years.length === 0}
+                className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors flex items-center gap-2 disabled:bg-gray-300 disabled:cursor-not-allowed"
+              >
+                <span className="text-xl">−</span>
+                <span>Delete Years</span>
+              </button>
+              <button
+                onClick={() => {
+                  console.log('Manual refresh clicked')
+                  loadHierarchyData()
+                }}
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex items-center gap-2"
+              >
+                <span className="text-xl">🔄</span>
+                <span>Refresh Advisors</span>
+              </button>
+            </div>
           </div>
 
           {message && (
@@ -441,27 +655,40 @@ export default function HierarchicalStudentView() {
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
               {years.map(year => {
               const count = selectedDept.students.byYear[year] || 0
+              // Get class advisor for this department-year combination
+              const classAdvisor = hierarchyData[selectedDept.name]?.[year]?.classAdvisor
+              
+              console.log(`Year card for ${selectedDept.name} ${year}:`, {
+                hierarchyData: hierarchyData[selectedDept.name]?.[year],
+                classAdvisor: classAdvisor
+              })
+              
               return (
                 <div
                   key={year}
-                  className="bg-gradient-to-br from-green-50 to-teal-50 rounded-xl p-6 cursor-pointer hover:shadow-xl transition-all duration-300 border-2 border-transparent hover:border-green-500 transform hover:scale-105 relative"
+                  onClick={() => handleYearClick(year)}
+                  className="bg-gradient-to-br from-green-50 to-teal-50 rounded-xl p-4 cursor-pointer hover:shadow-xl transition-all duration-300 border-2 border-transparent hover:border-green-500 transform hover:scale-105"
                 >
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      setYearToDelete(year)
-                      setShowDeleteYearModal(true)
-                    }}
-                    className="absolute top-2 right-2 w-8 h-8 flex items-center justify-center bg-red-500 hover:bg-red-600 text-white rounded-full text-sm z-10"
-                    title="Delete Year"
-                  >
-                    ×
-                  </button>
-                  <div onClick={() => handleYearClick(year)} className="text-center">
+                  <div className="text-center">
                     <div className="text-3xl mb-2">📚</div>
                     <h3 className="text-lg font-bold text-gray-800 mb-2">{year}</h3>
-                    <div className="text-3xl font-bold text-green-600">{count}</div>
-                    <div className="text-sm text-gray-600 mt-1">Students</div>
+                    <div className="text-3xl font-bold text-green-600 mb-1">{count}</div>
+                    <div className="text-sm text-gray-600 mb-3">Students</div>
+                    
+                    {/* Class Advisor Information */}
+                    <div className="border-t pt-3 mt-3">
+                      <div className="text-xs font-semibold text-blue-700 mb-1">👨‍🏫 Class Advisor:</div>
+                      {classAdvisor ? (
+                        <div className="bg-blue-100 rounded-lg p-2 text-xs">
+                          <div className="font-semibold text-blue-800">{classAdvisor.name}</div>
+                          <div className="text-blue-600">{classAdvisor.designation}</div>
+                        </div>
+                      ) : (
+                        <div className="bg-yellow-100 rounded-lg p-2 text-xs text-yellow-700">
+                          Not assigned
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
               )
@@ -476,7 +703,7 @@ export default function HierarchicalStudentView() {
             <div className="bg-white rounded-xl shadow-2xl p-6 max-w-md w-full mx-4" onClick={(e) => e.stopPropagation()}>
               <h2 className="text-xl font-bold mb-4">Add Year to {selectedDept?.name}</h2>
               <p className="text-sm text-gray-600 mb-4">
-                ℹ️ Note: Years appear automatically when you add students. Select the year you want to use, then add students to that year.
+                Create a new year that will appear immediately as a year card. You can then add students to this year.
               </p>
               <form onSubmit={handleAddYear} className="space-y-3">
                 <select
@@ -494,27 +721,65 @@ export default function HierarchicalStudentView() {
                 </select>
                 <div className="flex gap-2 justify-end">
                   <button type="button" onClick={() => { setShowAddYearModal(false); setMessage(''); }} className="px-4 py-2 bg-gray-200 rounded-lg">Cancel</button>
-                  <button type="submit" className="px-4 py-2 bg-green-600 text-white rounded-lg">Continue</button>
+                  <button type="submit" className="px-4 py-2 bg-green-600 text-white rounded-lg">Create Year</button>
                 </div>
               </form>
             </div>
           </div>
         )}
 
-        {/* Delete Year Modal */}
-        {showDeleteYearModal && yearToDelete && (
-          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => { setShowDeleteYearModal(false); setYearToDelete(null); }}>
-            <div className="bg-white rounded-xl shadow-2xl p-6 max-w-md w-full mx-4" onClick={(e) => e.stopPropagation()}>
-              <h2 className="text-xl font-bold mb-4 text-red-600">⚠️ Delete Year</h2>
+        {/* Bulk Delete Years Modal */}
+        {showBulkDeleteYearModal && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => { setShowBulkDeleteYearModal(false); setSelectedYears([]); }}>
+            <div className="bg-white rounded-xl shadow-2xl p-6 max-w-lg w-full mx-4" onClick={(e) => e.stopPropagation()}>
+              <h2 className="text-xl font-bold mb-4 text-red-600">⚠️ Delete Years</h2>
               <p className="mb-4 text-gray-700">
-                Are you sure you want to delete <strong>{yearToDelete}</strong> from <strong>{selectedDept?.name}</strong>?
+                Select year cards to delete from <strong>{selectedDept?.name}</strong>. This will permanently remove the year cards and all students in the selected years.
               </p>
-              <div className="mb-4 p-3 bg-red-50 text-red-800 rounded-lg text-sm">
-                <strong>Warning:</strong> This will delete all students in {yearToDelete}!
+              
+              <div className="max-h-60 overflow-y-auto mb-4">
+                {years.map(year => {
+                  const count = selectedDept.students.byYear[year] || 0
+                  return (
+                    <div key={year} className="flex items-center p-3 border rounded-lg mb-2 hover:bg-gray-50">
+                      <input
+                        type="checkbox"
+                        id={`year-${year}`}
+                        checked={selectedYears.includes(year)}
+                        onChange={() => toggleYearSelection(year)}
+                        className="mr-3 h-4 w-4 text-red-600 focus:ring-red-500 border-gray-300 rounded"
+                      />
+                      <label htmlFor={`year-${year}`} className="flex-1 cursor-pointer">
+                        <div className="font-medium">{year}</div>
+                        <div className="text-sm text-gray-500">
+                          {count} students
+                        </div>
+                      </label>
+                    </div>
+                  )
+                })}
               </div>
+              
+              {selectedYears.length > 0 && (
+                <div className="mb-4 p-3 bg-red-50 text-red-800 rounded-lg text-sm">
+                  <strong>Warning:</strong> This will permanently delete {selectedYears.length} year card(s) and all students in those years!
+                </div>
+              )}
+              
               <div className="flex gap-2 justify-end">
-                <button onClick={() => { setShowDeleteYearModal(false); setYearToDelete(null); }} className="px-4 py-2 bg-gray-200 rounded-lg hover:bg-gray-300">Cancel</button>
-                <button onClick={handleDeleteYear} className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700">Delete Year</button>
+                <button 
+                  onClick={() => { setShowBulkDeleteYearModal(false); setSelectedYears([]); }} 
+                  className="px-4 py-2 bg-gray-200 rounded-lg hover:bg-gray-300"
+                >
+                  Cancel
+                </button>
+                <button 
+                  onClick={handleBulkDeleteYears} 
+                  disabled={selectedYears.length === 0}
+                  className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:bg-gray-300 disabled:cursor-not-allowed"
+                >
+                  Delete {selectedYears.length} Year{selectedYears.length !== 1 ? 's' : ''}
+                </button>
               </div>
             </div>
           </div>
@@ -783,9 +1048,38 @@ export default function HierarchicalStudentView() {
       {/* Add Student Modal */}
       {showAddStudentModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => { setShowAddStudentModal(false); setMessage(''); }}>
-          <div className="bg-white rounded-xl shadow-2xl p-6 max-w-md w-full mx-4 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
-            <h2 className="text-xl font-bold mb-4">Add Student to {selectedDept?.name} - {selectedYear}</h2>
-            <form onSubmit={handleAddStudent} className="space-y-3">
+          <div className="bg-white rounded-xl shadow-2xl p-6 max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <h2 className="text-xl font-bold mb-4">Add Students to {selectedDept?.name} - {selectedYear}</h2>
+            
+            {/* Tab Navigation */}
+            <div className="flex mb-6 border-b">
+              <button
+                type="button"
+                onClick={() => setAddStudentTab('manual')}
+                className={`px-4 py-2 font-medium text-sm border-b-2 transition-colors ${
+                  addStudentTab === 'manual'
+                    ? 'border-blue-500 text-blue-600'
+                    : 'border-transparent text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                📝 Manual Entry
+              </button>
+              <button
+                type="button"
+                onClick={() => setAddStudentTab('csv')}
+                className={`px-4 py-2 font-medium text-sm border-b-2 transition-colors ${
+                  addStudentTab === 'csv'
+                    ? 'border-blue-500 text-blue-600'
+                    : 'border-transparent text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                📄 CSV Upload
+              </button>
+            </div>
+
+            {/* Manual Entry Tab */}
+            {addStudentTab === 'manual' && (
+              <form onSubmit={handleAddStudent} className="space-y-3">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Full Name *</label>
                 <input
@@ -823,20 +1117,22 @@ export default function HierarchicalStudentView() {
                 <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
                 <input
                   type="email"
-                  placeholder="student@example.com"
+                  placeholder="Enter email address"
                   value={newStudent.email}
                   onChange={(e) => setNewStudent({...newStudent, email: e.target.value})}
                   className="w-full px-3 py-2 border rounded-lg"
+                  autocomplete="off"
                 />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Password *</label>
                 <input
                   type="password"
-                  placeholder="Default: student123"
+                  placeholder="Enter password"
                   value={newStudent.password}
                   onChange={(e) => setNewStudent({...newStudent, password: e.target.value})}
                   className="w-full px-3 py-2 border rounded-lg"
+                  autocomplete="new-password"
                   required
                   minLength="6"
                 />
@@ -845,7 +1141,96 @@ export default function HierarchicalStudentView() {
                 <button type="button" onClick={() => { setShowAddStudentModal(false); setMessage(''); }} className="px-4 py-2 bg-gray-200 rounded-lg">Cancel</button>
                 <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded-lg">Add Student</button>
               </div>
-            </form>
+              </form>
+            )}
+
+            {/* CSV Upload Tab */}
+            {addStudentTab === 'csv' && (
+              <div className="space-y-4">
+                {/* CSV Format Instructions */}
+                <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                  <h3 className="font-semibold text-blue-800 mb-2">📋 CSV Format Requirements</h3>
+                  <p className="text-sm text-blue-700 mb-2">Your CSV file must include these columns (in any order):</p>
+                  <div className="text-xs font-mono bg-white p-2 rounded border">
+                    name,regNo,studentId,email,password
+                  </div>
+                  <p className="text-xs text-blue-600 mt-2">
+                    Example: John Doe,ES22CJ01,ES22CJ01,john@example.com,student123
+                  </p>
+                  <button
+                    type="button"
+                    onClick={downloadCSVTemplate}
+                    className="mt-2 px-3 py-1 bg-blue-100 text-blue-700 rounded text-xs hover:bg-blue-200 transition-colors"
+                  >
+                    💾 Download Template
+                  </button>
+                </div>
+
+                {/* File Upload */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Select CSV File</label>
+                  <input
+                    type="file"
+                    accept=".csv"
+                    onChange={handleCsvFileChange}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+                  />
+                </div>
+
+                {/* CSV Preview */}
+                {csvPreview.length > 0 && (
+                  <div>
+                    <h3 className="font-semibold text-gray-800 mb-2">📊 Preview ({csvPreview.length} students)</h3>
+                    <div className="max-h-64 overflow-y-auto border rounded-lg">
+                      <table className="min-w-full text-xs">
+                        <thead className="bg-gray-50">
+                          <tr>
+                            <th className="px-2 py-1 text-left">Name</th>
+                            <th className="px-2 py-1 text-left">Reg No</th>
+                            <th className="px-2 py-1 text-left">Student ID</th>
+                            <th className="px-2 py-1 text-left">Email</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y">
+                          {csvPreview.slice(0, 10).map((student, index) => (
+                            <tr key={index} className="hover:bg-gray-50">
+                              <td className="px-2 py-1">{student.name}</td>
+                              <td className="px-2 py-1">{student.regno || student.regNo}</td>
+                              <td className="px-2 py-1">{student.studentid || student.studentId}</td>
+                              <td className="px-2 py-1">{student.email}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      {csvPreview.length > 10 && (
+                        <div className="text-center py-2 text-gray-500 text-xs">
+                          ... and {csvPreview.length - 10} more students
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Upload Actions */}
+                <div className="flex gap-2 justify-end">
+                  <button 
+                    type="button" 
+                    onClick={() => { setShowAddStudentModal(false); setMessage(''); }} 
+                    className="px-4 py-2 bg-gray-200 rounded-lg"
+                  >
+                    Cancel
+                  </button>
+                  <button 
+                    type="button" 
+                    onClick={handleBulkUpload}
+                    disabled={csvPreview.length === 0}
+                    className="px-4 py-2 bg-green-600 text-white rounded-lg disabled:bg-gray-300 disabled:cursor-not-allowed"
+                  >
+                    Upload {csvPreview.length} Students
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

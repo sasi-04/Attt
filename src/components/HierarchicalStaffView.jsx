@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react'
-import { apiGet, adminApi } from './api.js'
+import React, { useState, useEffect, useCallback } from 'react'
+import { adminApi } from './api.js'
+import { useDepartmentUpdates, useStaffUpdates } from '../hooks/useWebSocket.js'
 
 export default function HierarchicalStaffView() {
   const [viewLevel, setViewLevel] = useState('departments') // 'departments', 'staff'
@@ -16,6 +17,12 @@ export default function HierarchicalStaffView() {
   const [showPasswordModal, setShowPasswordModal] = useState(false)
   const [selectedStaff, setSelectedStaff] = useState(null)
   
+  // Department Management Modals
+  const [showAddDeptModal, setShowAddDeptModal] = useState(false)
+  const [showBulkDeleteModal, setShowBulkDeleteModal] = useState(false)
+  const [selectedDepartments, setSelectedDepartments] = useState([])
+  const [newDeptName, setNewDeptName] = useState('')
+  
   // Form data
   const [formData, setFormData] = useState({
     name: '',
@@ -23,17 +30,63 @@ export default function HierarchicalStaffView() {
     password: '',
     department: 'M.Tech',
     designation: 'Assistant Professor',
-    contact: ''
+    contact: '',
+    isClassAdvisor: false,
+    advisorYear: ''
   })
+  const [availableYears, setAvailableYears] = useState([])
+  const [loadingYears, setLoadingYears] = useState(false)
 
   useEffect(() => {
     loadDepartments()
   }, [])
 
+  // Clear form when modal closes
+  useEffect(() => {
+    if (!showAddModal) {
+      console.log('Modal closed, clearing form data')
+      setFormData({
+        name: '',
+        email: '',
+        password: '',
+        department: 'M.Tech',
+        designation: 'Assistant Professor',
+        contact: '',
+        isClassAdvisor: false,
+        advisorYear: ''
+      })
+      setAvailableYears([])
+    } else {
+      console.log('Modal opened, current form data:', formData)
+    }
+  }, [showAddModal])
+
+  // Handle real-time department updates
+  const handleDepartmentUpdate = useCallback((update) => {
+    console.log('Department update received:', update)
+    // Refresh departments when any department-related change occurs
+    loadDepartments()
+  }, [])
+
+  // Handle real-time staff updates
+  const handleStaffUpdate = useCallback((update) => {
+    console.log('Staff update received:', update)
+    // Refresh departments to update counts
+    loadDepartments()
+    // If we're viewing staff for a specific department, refresh that too
+    if (selectedDept && viewLevel === 'staff') {
+      loadStaff(selectedDept.name)
+    }
+  }, [selectedDept, viewLevel])
+
+  // Subscribe to WebSocket updates
+  useDepartmentUpdates(handleDepartmentUpdate)
+  useStaffUpdates(handleStaffUpdate)
+
   const loadDepartments = async () => {
     try {
       setLoading(true)
-      const response = await apiGet('/admin/departments/summary')
+      const response = await adminApi.getDepartmentsSummary()
       setDepartments(response.departments)
     } catch (error) {
       console.error('Failed to load departments:', error)
@@ -46,7 +99,7 @@ export default function HierarchicalStaffView() {
   const loadStaff = async (dept) => {
     try {
       setLoading(true)
-      const response = await apiGet(`/admin/staff/by-department?department=${dept}`)
+      const response = await adminApi.getStaffByDepartment(dept)
       // Sort by name
       const sortedStaff = response.staff.sort((a, b) => a.name.localeCompare(b.name))
       setStaff(sortedStaff)
@@ -55,6 +108,45 @@ export default function HierarchicalStaffView() {
       setMessage('Failed to load staff')
     } finally {
       setLoading(false)
+    }
+  }
+
+  const loadAvailableYears = async (department) => {
+    try {
+      setLoadingYears(true)
+      console.log('Loading available years for department:', department)
+      // Get students to find available years in this department
+      const response = await adminApi.getStudentsByDepartment(department, null)
+      console.log('Students response:', response)
+      
+      if (response && response.students && Array.isArray(response.students)) {
+        const years = [...new Set(response.students
+          .filter(s => !s.isYearPlaceholder)
+          .map(s => s.year)
+          .filter(year => year && year.trim() !== '')
+        )].sort()
+        console.log('Available years found:', years)
+        setAvailableYears(years)
+        
+        // If no years found, add some default years
+        if (years.length === 0) {
+          const defaultYears = ['1st Year', '2nd Year', '3rd Year', '4th Year']
+          console.log('No years found, using default years:', defaultYears)
+          setAvailableYears(defaultYears)
+        }
+      } else {
+        console.warn('Invalid response format:', response)
+        // Fallback to default years
+        const defaultYears = ['1st Year', '2nd Year', '3rd Year', '4th Year']
+        setAvailableYears(defaultYears)
+      }
+    } catch (error) {
+      console.error('Failed to load years:', error)
+      // Fallback to default years on error
+      const defaultYears = ['1st Year', '2nd Year', '3rd Year', '4th Year']
+      setAvailableYears(defaultYears)
+    } finally {
+      setLoadingYears(false)
     }
   }
 
@@ -71,14 +163,20 @@ export default function HierarchicalStaffView() {
   }
 
   const openAddModal = () => {
-    setFormData({
+    // Force clear all form data
+    const cleanFormData = {
       name: '',
       email: '',
       password: '',
       department: selectedDept?.name || 'M.Tech',
       designation: 'Assistant Professor',
-      contact: ''
-    })
+      contact: '',
+      isClassAdvisor: false,
+      advisorYear: ''
+    }
+    console.log('Opening add modal with clean form data:', cleanFormData)
+    setFormData(cleanFormData)
+    setAvailableYears([])
     setShowAddModal(true)
     setMessage('')
   }
@@ -112,10 +210,71 @@ export default function HierarchicalStaffView() {
   const handleAddStaff = async (e) => {
     e.preventDefault()
     try {
-      await adminApi.addStaff(formData)
-      setMessage('Staff added successfully!')
+      const staffData = {
+        ...formData,
+        department: selectedDept.name
+      }
+      
+      // Add staff first
+      const addResponse = await adminApi.addStaff(staffData)
+      
+      // If this staff is assigned as class advisor, assign them to hierarchy
+      if (formData.isClassAdvisor && formData.advisorYear) {
+        try {
+          console.log('Assigning class advisor to hierarchy:', {
+            staffId: formData.email,
+            department: selectedDept.name,
+            year: formData.advisorYear,
+            isClassAdvisor: true
+          })
+          
+          const hierarchyResponse = await fetch('/admin/hierarchy/assign-staff', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              staffId: formData.email, // Staff ID is their email
+              department: selectedDept.name,
+              year: formData.advisorYear,
+              isClassAdvisor: true
+            })
+          })
+          
+          const hierarchyData = await hierarchyResponse.json()
+          console.log('Hierarchy assignment response:', hierarchyData)
+          
+          if (!hierarchyResponse.ok) {
+            console.error('Hierarchy assignment failed:', hierarchyData)
+          } else {
+            console.log('✓ Class advisor assigned to hierarchy successfully')
+          }
+        } catch (hierarchyError) {
+          console.error('Failed to assign class advisor:', hierarchyError)
+          // Don't fail the whole operation if hierarchy assignment fails
+        }
+      }
+      
+      // Remove department placeholder if it exists
+      const currentStaff = await adminApi.getStaffByDepartment(selectedDept.name)
+      const placeholderStaff = currentStaff.staff.find(s => s.isDepartmentPlaceholder || s.designation === 'Department Placeholder')
+      if (placeholderStaff) {
+        await adminApi.deleteStaff(placeholderStaff.id)
+      }
+      
+      setMessage(`Staff added successfully!${formData.isClassAdvisor ? ' Assigned as class advisor for ' + formData.advisorYear : ''}`)
       setShowAddModal(false)
-      loadStaff(selectedDept.name)
+      setFormData({
+        name: '',
+        email: '',
+        password: '',
+        department: 'M.Tech',
+        designation: 'Assistant Professor',
+        contact: '',
+        isClassAdvisor: false,
+        advisorYear: ''
+      })
+      await loadStaff(selectedDept.name)
+      // Also refresh departments to update counts
+      await loadDepartments()
     } catch (error) {
       setMessage('Failed to add staff')
     }
@@ -156,6 +315,102 @@ export default function HierarchicalStaffView() {
     }
   }
 
+  const handleAddDepartment = async (e) => {
+    e.preventDefault()
+    if (!newDeptName.trim()) {
+      setMessage('Please enter a department name')
+      setTimeout(() => setMessage(''), 3000)
+      return
+    }
+    
+    try {
+      const response = await adminApi.createDepartment(newDeptName.trim())
+      
+      setShowAddDeptModal(false)
+      setMessage(`✓ Department "${newDeptName}" created successfully! The department card is now available.`)
+      setNewDeptName('')
+      
+      // Refresh departments list
+      await loadDepartments()
+      
+      setTimeout(() => setMessage(''), 5000)
+    } catch (error) {
+      console.error('Department creation error:', error)
+      const errorMessage = error.response?.data?.error || error.message || 'Unknown error'
+      setMessage('Failed to create department: ' + errorMessage)
+      setTimeout(() => setMessage(''), 3000)
+    }
+  }
+
+  const handleBulkDeleteDepartments = async () => {
+    try {
+      let deletedCount = 0
+      let totalStaffDeleted = 0
+      let totalStudentsDeleted = 0
+      
+      for (const deptName of selectedDepartments) {
+        console.log(`Deleting department: ${deptName}`)
+        
+        try {
+          // Delete all staff in this department
+          console.log(`Getting staff for department: ${deptName}`)
+          const staffResponse = await adminApi.getStaffByDepartment(deptName)
+          console.log(`Found ${staffResponse.staff.length} staff members`)
+          
+          for (const staff of staffResponse.staff) {
+            try {
+              await adminApi.deleteStaff(staff.id)
+              totalStaffDeleted++
+              console.log(`Deleted staff: ${staff.name}`)
+            } catch (staffError) {
+              console.error(`Failed to delete staff ${staff.name}:`, staffError)
+            }
+          }
+          
+          // Delete all students in this department
+          console.log(`Getting students for department: ${deptName}`)
+          const studentsResponse = await adminApi.getStudentsByDepartment(deptName, null)
+          console.log(`Found ${studentsResponse.students.length} students`)
+          
+          for (const student of studentsResponse.students) {
+            try {
+              await adminApi.deleteStudent(student.regNo)
+              totalStudentsDeleted++
+              console.log(`Deleted student: ${student.name}`)
+            } catch (studentError) {
+              console.error(`Failed to delete student ${student.name}:`, studentError)
+            }
+          }
+          
+          deletedCount++
+          console.log(`Successfully processed department: ${deptName}`)
+          
+        } catch (deptError) {
+          console.error(`Failed to process department ${deptName}:`, deptError)
+        }
+      }
+      
+      setMessage(`${deletedCount} department(s) deleted successfully! (${totalStaffDeleted} staff, ${totalStudentsDeleted} students)`)
+      setShowBulkDeleteModal(false)
+      setSelectedDepartments([])
+      await loadDepartments()
+      setTimeout(() => setMessage(''), 5000)
+    } catch (error) {
+      console.error('Bulk delete error:', error)
+      setMessage('Failed to delete departments: ' + (error.message || 'Unknown error'))
+      setShowBulkDeleteModal(false)
+      setTimeout(() => setMessage(''), 3000)
+    }
+  }
+
+  const toggleDepartmentSelection = (deptName) => {
+    setSelectedDepartments(prev => 
+      prev.includes(deptName) 
+        ? prev.filter(name => name !== deptName)
+        : [...prev, deptName]
+    )
+  }
+
   if (loading && viewLevel === 'departments') {
     return (
       <div className="flex items-center justify-center h-64">
@@ -169,8 +424,35 @@ export default function HierarchicalStaffView() {
     return (
       <div className="space-y-6">
         <div className="bg-white rounded-xl shadow-md p-6">
-          <h2 className="text-2xl font-bold mb-2">Select Department</h2>
-          <p className="text-gray-600 mb-6">Choose a department to manage staff</p>
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h2 className="text-2xl font-bold mb-2">Select Department</h2>
+              <p className="text-gray-600">Choose a department to manage staff</p>
+            </div>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setShowAddDeptModal(true)}
+                className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors flex items-center gap-2"
+              >
+                <span className="text-xl">+</span>
+                <span>Add Department</span>
+              </button>
+              <button
+                onClick={() => setShowBulkDeleteModal(true)}
+                className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors flex items-center gap-2"
+                disabled={departments.length === 0}
+              >
+                <span className="text-xl">−</span>
+                <span>Delete Departments</span>
+              </button>
+            </div>
+          </div>
+
+          {message && (
+            <div className={`mb-4 p-3 rounded-lg ${message.includes('success') || message.includes('✓') ? 'bg-green-50 text-green-800' : 'bg-red-50 text-red-800'}`}>
+              {message}
+            </div>
+          )}
           
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
             {departments.map(dept => (
@@ -198,6 +480,86 @@ export default function HierarchicalStaffView() {
             ))}
           </div>
         </div>
+
+        {/* Add Department Modal */}
+        {showAddDeptModal && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => { setShowAddDeptModal(false); setMessage(''); }}>
+            <div className="bg-white rounded-xl shadow-2xl p-6 max-w-md w-full mx-4" onClick={(e) => e.stopPropagation()}>
+              <h2 className="text-xl font-bold mb-4">Add New Department</h2>
+              <p className="text-sm text-gray-600 mb-4">
+                Create a new department that will appear immediately as a department card. You can then add staff to this department.
+              </p>
+              <form onSubmit={handleAddDepartment} className="space-y-3">
+                <input
+                  type="text"
+                  placeholder="Department Name (e.g., Computer Science)"
+                  value={newDeptName}
+                  onChange={(e) => setNewDeptName(e.target.value)}
+                  className="w-full px-3 py-2 border rounded-lg"
+                  required
+                />
+                <div className="flex gap-2 justify-end">
+                  <button type="button" onClick={() => { setShowAddDeptModal(false); setMessage(''); }} className="px-4 py-2 bg-gray-200 rounded-lg">Cancel</button>
+                  <button type="submit" className="px-4 py-2 bg-purple-600 text-white rounded-lg">Create Department</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {/* Bulk Delete Departments Modal */}
+        {showBulkDeleteModal && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => { setShowBulkDeleteModal(false); setSelectedDepartments([]); }}>
+            <div className="bg-white rounded-xl shadow-2xl p-6 max-w-lg w-full mx-4" onClick={(e) => e.stopPropagation()}>
+              <h2 className="text-xl font-bold mb-4 text-red-600">⚠️ Delete Departments</h2>
+              <p className="mb-4 text-gray-700">
+                Select departments to delete. This will permanently remove all staff and data in the selected departments.
+              </p>
+              
+              <div className="max-h-60 overflow-y-auto mb-4">
+                {departments.map(dept => (
+                  <div key={dept.name} className="flex items-center p-3 border rounded-lg mb-2 hover:bg-gray-50">
+                    <input
+                      type="checkbox"
+                      id={`dept-${dept.name}`}
+                      checked={selectedDepartments.includes(dept.name)}
+                      onChange={() => toggleDepartmentSelection(dept.name)}
+                      className="mr-3 h-4 w-4 text-red-600 focus:ring-red-500 border-gray-300 rounded"
+                    />
+                    <label htmlFor={`dept-${dept.name}`} className="flex-1 cursor-pointer">
+                      <div className="font-medium">{dept.name}</div>
+                      <div className="text-sm text-gray-500">
+                        {dept.staff.total} staff, {dept.students.total} students
+                      </div>
+                    </label>
+                  </div>
+                ))}
+              </div>
+              
+              {selectedDepartments.length > 0 && (
+                <div className="mb-4 p-3 bg-red-50 text-red-800 rounded-lg text-sm">
+                  <strong>Warning:</strong> This will delete {selectedDepartments.length} department(s) and all their associated staff and student data!
+                </div>
+              )}
+              
+              <div className="flex gap-2 justify-end">
+                <button 
+                  onClick={() => { setShowBulkDeleteModal(false); setSelectedDepartments([]); }} 
+                  className="px-4 py-2 bg-gray-200 rounded-lg hover:bg-gray-300"
+                >
+                  Cancel
+                </button>
+                <button 
+                  onClick={handleBulkDeleteDepartments} 
+                  disabled={selectedDepartments.length === 0}
+                  className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:bg-gray-300 disabled:cursor-not-allowed"
+                >
+                  Delete {selectedDepartments.length} Department{selectedDepartments.length !== 1 ? 's' : ''}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     )
   }
@@ -307,19 +669,143 @@ export default function HierarchicalStaffView() {
 
       {/* Add Staff Modal */}
       {showAddModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => setShowAddModal(false)}>
-          <div className="bg-white rounded-xl shadow-2xl p-6 max-w-md w-full mx-4" onClick={(e) => e.stopPropagation()}>
+        <div 
+          className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" 
+          onClick={(e) => {
+            e.preventDefault()
+            setShowAddModal(false)
+          }}
+        >
+          <div 
+            className="bg-white rounded-xl shadow-2xl p-6 max-w-md w-full mx-4" 
+            onClick={(e) => {
+              e.stopPropagation()
+              e.preventDefault()
+            }}
+          >
             <h2 className="text-xl font-bold mb-4">Add New Staff</h2>
-            <form onSubmit={handleAddStaff} className="space-y-3">
-              <input type="text" placeholder="Name" value={formData.name} onChange={(e) => setFormData({...formData, name: e.target.value})} className="w-full px-3 py-2 border rounded-lg" required />
-              <input type="email" placeholder="Email" value={formData.email} onChange={(e) => setFormData({...formData, email: e.target.value})} className="w-full px-3 py-2 border rounded-lg" required />
-              <input type="password" placeholder="Password" value={formData.password} onChange={(e) => setFormData({...formData, password: e.target.value})} className="w-full px-3 py-2 border rounded-lg" required />
-              <input type="text" placeholder="Contact" value={formData.contact} onChange={(e) => setFormData({...formData, contact: e.target.value})} className="w-full px-3 py-2 border rounded-lg" />
-              <select value={formData.designation} onChange={(e) => setFormData({...formData, designation: e.target.value})} className="w-full px-3 py-2 border rounded-lg">
-                <option>Assistant Professor</option>
-                <option>Associate Professor</option>
-                <option>Professor</option>
-              </select>
+            <form key="add-staff-form" onSubmit={handleAddStaff} className="space-y-3">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Full Name *</label>
+                <input type="text" placeholder="Enter full name" value={formData.name} onChange={(e) => setFormData({...formData, name: e.target.value})} className="w-full px-3 py-2 border rounded-lg" required />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Email Address *</label>
+                <input 
+                  type="email" 
+                  placeholder="Enter email address" 
+                  value={formData.email} 
+                  onChange={(e) => {
+                    e.stopPropagation()
+                    setFormData({...formData, email: e.target.value})
+                  }}
+                  onKeyDown={(e) => {
+                    e.stopPropagation()
+                  }}
+                  onFocus={(e) => {
+                    e.stopPropagation()
+                  }}
+                  className="w-full px-3 py-2 border rounded-lg" 
+                  autocomplete="new-email" 
+                  autoComplete="new-email"
+                  required 
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Password *</label>
+                <input 
+                  type="password" 
+                  placeholder="Enter password" 
+                  value={formData.password} 
+                  onChange={(e) => {
+                    e.stopPropagation()
+                    setFormData({...formData, password: e.target.value})
+                  }}
+                  onKeyDown={(e) => {
+                    e.stopPropagation()
+                  }}
+                  onFocus={(e) => {
+                    e.stopPropagation()
+                  }}
+                  className="w-full px-3 py-2 border rounded-lg" 
+                  autocomplete="new-password" 
+                  autoComplete="new-password"
+                  required 
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Contact Number</label>
+                <input type="text" placeholder="Enter contact number" value={formData.contact} onChange={(e) => setFormData({...formData, contact: e.target.value})} className="w-full px-3 py-2 border rounded-lg" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Designation *</label>
+                <select value={formData.designation} onChange={(e) => setFormData({...formData, designation: e.target.value})} className="w-full px-3 py-2 border rounded-lg">
+                  <option>Assistant Professor</option>
+                  <option>Associate Professor</option>
+                  <option>Professor</option>
+                </select>
+              </div>
+              
+              {/* Class Advisor Assignment */}
+              <div className="bg-blue-50 p-3 rounded-lg border">
+                <div className="flex items-center mb-2">
+                  <input 
+                    type="checkbox" 
+                    id="isClassAdvisor" 
+                    checked={formData.isClassAdvisor}
+                    onChange={(e) => {
+                      console.log('Class advisor checkbox changed:', e.target.checked)
+                      console.log('Selected department:', selectedDept?.name)
+                      setFormData({...formData, isClassAdvisor: e.target.checked})
+                      if (e.target.checked && selectedDept?.name) {
+                        console.log('Loading years for department:', selectedDept.name)
+                        loadAvailableYears(selectedDept.name)
+                      } else if (e.target.checked) {
+                        console.warn('No department selected, cannot load years')
+                      }
+                    }}
+                    className="mr-2 h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+                  />
+                  <label htmlFor="isClassAdvisor" className="text-sm font-medium text-blue-800">
+                    👨‍🏫 Assign as Class Advisor
+                  </label>
+                </div>
+                
+                {formData.isClassAdvisor && (
+                  <div>
+                    <label className="block text-sm font-medium text-blue-700 mb-1">Select Year:</label>
+                    {loadingYears ? (
+                      <div className="w-full px-3 py-2 border border-blue-300 rounded-lg bg-gray-50 text-gray-500 text-center">
+                        Loading years...
+                      </div>
+                    ) : (
+                      <select 
+                        value={formData.advisorYear} 
+                        onChange={(e) => setFormData({...formData, advisorYear: e.target.value})}
+                        className="w-full px-3 py-2 border border-blue-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                        required={formData.isClassAdvisor}
+                        disabled={loadingYears}
+                      >
+                        <option value="">Select Year</option>
+                        {availableYears.map(year => (
+                          <option key={year} value={year}>{year}</option>
+                        ))}
+                      </select>
+                    )}
+                    {availableYears.length === 0 && !loadingYears && (
+                      <p className="text-xs text-orange-600 mt-1">
+                        No years found. Default years will be available.
+                      </p>
+                    )}
+                    {formData.advisorYear && (
+                      <p className="text-xs text-blue-600 mt-1">
+                        This staff will be assigned as class advisor for {selectedDept.name} {formData.advisorYear}
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+              
               <div className="flex gap-2 justify-end">
                 <button type="button" onClick={() => setShowAddModal(false)} className="px-4 py-2 bg-gray-200 rounded-lg">Cancel</button>
                 <button type="submit" className="px-4 py-2 bg-blue-600 text-white rounded-lg">Add Staff</button>

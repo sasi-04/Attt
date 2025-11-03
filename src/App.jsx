@@ -25,6 +25,7 @@ import AdminManageStudents from './pages/admin/ManageStudents.jsx'
 import AdminAttendance from './pages/admin/Attendance.jsx'
 import AdminLeaveRequests from './pages/admin/LeaveRequests.jsx'
 import AdminSettings from './pages/admin/Settings.jsx'
+import AdminHierarchyManagement from './pages/admin/HierarchyManagement.jsx'
 import StudentScanAttendance from './pages/student/Attendance.jsx'
 
 function App() {
@@ -63,6 +64,7 @@ function App() {
             <Route path="dashboard" element={<AdminDashboard />} />
             <Route path="staff" element={<AdminManageStaff />} />
             <Route path="students" element={<AdminManageStudents />} />
+            <Route path="hierarchy" element={<AdminHierarchyManagement />} />
             <Route path="attendance" element={<AdminAttendance />} />
             <Route path="leave" element={<AdminLeaveRequests />} />
             <Route path="settings" element={<AdminSettings />} />

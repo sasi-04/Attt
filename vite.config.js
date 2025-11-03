@@ -13,6 +13,15 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api/, '')
       },
+      // Admin routes
+      '/admin': { target: 'http://localhost:3001', changeOrigin: true },
+      // Specific admin sub-routes
+      '/admin/years': { target: 'http://localhost:3001', changeOrigin: true },
+      '/admin/departments': { target: 'http://localhost:3001', changeOrigin: true },
+      // Staff routes
+      '/staff': { target: 'http://localhost:3001', changeOrigin: true },
+      // Student routes
+      '/student': { target: 'http://localhost:3001', changeOrigin: true },
       '/qr': { target: 'http://localhost:3001', changeOrigin: true },
       '/sessions': { target: 'http://localhost:3001', changeOrigin: true },
       '/attendance': { target: 'http://localhost:3001', changeOrigin: true },

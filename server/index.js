@@ -16,6 +16,28 @@ const allowedOrigins = (process.env.CORS_ORIGIN || '*')
   .map(s => s.trim())
 const io = new SocketIOServer(server, { cors: { origin: allowedOrigins, methods: ['GET','POST'] } })
 
+// WebSocket connection handling for real-time updates
+io.on('connection', (socket) => {
+  console.log('Admin panel connected:', socket.id)
+  
+  // Join admin room for broadcasts
+  socket.join('admin-panel')
+  
+  socket.on('disconnect', () => {
+    console.log('Admin panel disconnected:', socket.id)
+  })
+})
+
+// Helper function to broadcast admin updates
+function broadcastAdminUpdate(eventType, data) {
+  console.log('Broadcasting admin update:', eventType, data)
+  io.to('admin-panel').emit('admin-update', {
+    type: eventType,
+    data: data,
+    timestamp: Date.now()
+  })
+}
+
 app.use(cors({ origin: allowedOrigins }))
 app.use(express.json())
 
@@ -49,8 +71,33 @@ const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-me'
     const staffEmail = 'staff@demo.com'
     const found = await getStaffByEmail(staffEmail)
     if (!found) {
-      await createStaff({ id: staffEmail, name: 'Demo Staff', email: staffEmail, password: 'staff123' })
+      await createStaff({ 
+        id: staffEmail, 
+        name: 'Demo Staff', 
+        email: staffEmail, 
+        password: 'staff123',
+        department: 'Computer Science',
+        designation: 'Assistant Professor',
+        accessLevel: 'staff'
+      })
       console.log('[seed] Created demo staff user: staff@demo.com / staff123')
+    }
+    
+    // Create admin user
+    const adminEmail = 'admin@attendance.edu'
+    const adminFound = await getStaffByEmail(adminEmail)
+    if (!adminFound) {
+      await createStaff({ 
+        id: adminEmail, 
+        name: 'System Administrator', 
+        email: adminEmail, 
+        password: 'admin@2024',
+        department: 'Administration',
+        designation: 'System Administrator',
+        accessLevel: 'admin',
+        isSystemAdmin: true
+      })
+      console.log('[seed] Created admin user: admin@attendance.edu / admin@2024')
     }
   } catch (e) {
     console.warn('[seed] skipped or failed:', e?.message)
@@ -173,11 +220,37 @@ app.get('/sessions/:sessionId/qr', (req, res) => {
   }).catch(() => res.status(500).json({ error: 'qr_error' }))
 })
 
-// Student scan
+// Student scan with hierarchical access control
 app.post('/attendance/scan', async (req, res) => {
-  const { token, studentId = 'student1' } = req.body || {}
+  const { token, studentId = 'student1', sessionDepartment, sessionYear } = req.body || {}
   if (!token) return res.status(400).json({ error: 'token_required' })
+  if (!sessionDepartment || !sessionYear) {
+    return res.status(400).json({ error: 'session_context_required', message: 'Session department and year are required' })
+  }
+  
   try {
+    // First check hierarchical access
+    const student = await dbGetStudentByRegNo(studentId)
+    if (!student) {
+      return res.status(404).json({ error: 'student_not_found' })
+    }
+    
+    const studentDept = student.department || 'M.Tech'
+    const studentYear = student.year || '4th Year'
+    
+    // Enforce hierarchical access control
+    if (studentDept !== sessionDepartment || studentYear !== sessionYear) {
+      console.log(`Access denied: Student ${studentId} (${studentDept} ${studentYear}) tried to access ${sessionDepartment} ${sessionYear} session`)
+      return res.status(403).json({ 
+        error: 'access_denied',
+        message: `Access denied. This QR code is for ${sessionDepartment} ${sessionYear} students only.`,
+        studentDepartment: studentDept,
+        studentYear: studentYear,
+        sessionDepartment,
+        sessionYear
+      })
+    }
+    
     const cleaned = String(token).trim().toUpperCase()
     let jti
     let sessionId
@@ -212,7 +285,14 @@ app.post('/attendance/scan', async (req, res) => {
       countRemaining: Math.max(0, sess.enrolled.size - sess.present.size)
     })
 
-    return res.json({ status: 'present', sessionId, markedAt: new Date().toISOString() })
+    console.log(`Access granted: Student ${studentId} (${studentDept} ${studentYear}) marked present in ${sessionDepartment} ${sessionYear} session`)
+    return res.json({ 
+      status: 'present', 
+      sessionId, 
+      markedAt: new Date().toISOString(),
+      studentDepartment: studentDept,
+      studentYear: studentYear
+    })
   } catch (e) {
     console.error('Scan validate error:', e)
     if (e.name === 'TokenExpiredError') return res.status(410).json({ error: 'expired_code' })
@@ -223,7 +303,7 @@ app.post('/attendance/scan', async (req, res) => {
 // Generate QR on-demand (new token per click). If sessionId missing or invalid, start new session
 app.post('/qr/generate', async (req, res) => {
   try {
-    const { sessionId: providedSessionId, courseId = 'COURSE1' } = req.body || {}
+    const { sessionId: providedSessionId, courseId = 'COURSE1', sessionDepartment, sessionYear } = req.body || {}
     if (!courseId) return res.status(400).json({ error: 'course_required', message: 'courseId is required' })
     let sessionId = providedSessionId
     let sess = sessionId && sessions.get(sessionId)
@@ -380,14 +460,51 @@ app.post('/auth/student/change-password', async (req, res) => {
   }
 })
 
-// Admin auth (demo)
+// Admin auth
 app.post('/auth/admin/login', async (req, res) => {
+  console.log('[ADMIN AUTH] Admin login attempt:', req.body)
   const { email, password } = req.body || {}
-  if (!email || !password) return res.status(400).json({ error: 'email_password_required' })
-  if (email === 'admin@demo.com' && password === 'admin123') {
-    return res.json({ id: 'admin', name: 'Admin User', email: 'admin@demo.com', role: 'admin' })
+  if (!email || !password) {
+    console.log('[ADMIN AUTH] Missing email or password')
+    return res.status(400).json({ error: 'email_password_required' })
   }
-  return res.status(401).json({ error: 'invalid_credentials' })
+  
+  // Check demo admin credentials
+  if (email === 'admin@demo.com' && password === 'admin123') {
+    console.log('[ADMIN AUTH] Demo admin login successful')
+    return res.json({ id: 'admin', name: 'Demo Admin', email: 'admin@demo.com', role: 'admin' })
+  }
+  
+  // Check database admin users
+  try {
+    const staff = await getStaffByEmail(String(email).trim().toLowerCase())
+    console.log('[ADMIN AUTH] Staff found:', staff ? staff.email : 'null')
+    
+    if (!staff || staff.password !== password) {
+      console.log('[ADMIN AUTH] Invalid credentials - staff exists:', !!staff, 'password match:', staff?.password === password)
+      return res.status(401).json({ error: 'invalid_credentials' })
+    }
+    
+    // Check if user has admin access
+    if (staff.accessLevel !== 'admin' && !staff.isSystemAdmin) {
+      console.log('[ADMIN AUTH] Access denied - user is not admin:', staff.accessLevel)
+      return res.status(403).json({ error: 'access_denied', message: 'Admin access required' })
+    }
+    
+    console.log('[ADMIN AUTH] Admin login successful for:', staff.email)
+    return res.json({ 
+      id: staff.id, 
+      name: staff.name, 
+      email: staff.email, 
+      role: 'admin',
+      accessLevel: staff.accessLevel,
+      isSystemAdmin: staff.isSystemAdmin || false
+    })
+    
+  } catch (error) {
+    console.error('[ADMIN AUTH] Database error:', error)
+    return res.status(500).json({ error: 'internal_error' })
+  }
 })
 
 // Staff Profile & Analytics APIs
@@ -1289,6 +1406,23 @@ app.get('/admin/dashboard/stats', async (req, res) => {
     const allLeaves = await getAllLeaveRequests()
     const allSessions = await getAllSessions()
     
+    // Get department count
+    const allStudents = await listAllStudents() // This gets all students
+    const allStaffList = await listStaff() // This gets all staff
+    const departments = new Set()
+    
+    // Add departments from students
+    allStudents.forEach(student => {
+      if (student.department) departments.add(student.department)
+    })
+    
+    // Add departments from staff
+    allStaffList.forEach(staff => {
+      if (staff.department) departments.add(staff.department)
+    })
+    
+    const departmentCount = departments.size
+    
     const pendingLeaves = allLeaves.filter(l => l.status === 'pending').length
     const attendanceRecordsCount = allAttendance.length
     
@@ -1343,6 +1477,7 @@ app.get('/admin/dashboard/stats', async (req, res) => {
     return res.json({
       staffCount,
       studentCount,
+      departmentCount,
       attendanceRecordsCount,
       pendingLeaves,
       totalSessions: allSessions.length,
@@ -1375,7 +1510,14 @@ app.get('/admin/staff/list', async (req, res) => {
       designation: s.designation || 'Staff',
       contact: s.contact || '',
       status: s.status || 'Active',
-      joiningDate: s.joiningDate || null
+      joiningDate: s.joiningDate || null,
+      // Include hierarchical fields
+      assignedDepartments: s.assignedDepartments || [],
+      assignedYears: s.assignedYears || [],
+      isClassAdvisor: s.isClassAdvisor || false,
+      advisorFor: s.advisorFor || null,
+      accessLevel: s.accessLevel || 'staff',
+      isDepartmentPlaceholder: s.isDepartmentPlaceholder || false
     }))
     return res.json({ staff: staffList })
   } catch (error) {
@@ -1408,7 +1550,18 @@ app.post('/admin/staff/add', async (req, res) => {
       designation: designation || 'Assistant Professor',
       contact: contact || '',
       status: 'Active',
-      joiningDate: Date.now()
+      joiningDate: Date.now(),
+      // Initialize hierarchical fields
+      assignedDepartments: [],
+      assignedYears: [],
+      isClassAdvisor: false,
+      advisorFor: null,
+      accessLevel: 'staff'
+    })
+    
+    // Broadcast staff creation to all admin panels
+    broadcastAdminUpdate('staff-created', {
+      staff: { id: staff.id, name: staff.name, email: staff.email, department: staff.department }
     })
     
     return res.json({ 
@@ -1439,6 +1592,13 @@ app.put('/admin/staff/:id', async (req, res) => {
     
     await updateStaff(id, updates)
     
+    // Broadcast staff update to all admin panels
+    broadcastAdminUpdate('staff-updated', {
+      staffId: id,
+      staffName: staff.name,
+      updates: updates
+    })
+    
     return res.json({ success: true, message: 'Staff updated successfully' })
   } catch (error) {
     console.error('Update staff error:', error)
@@ -1457,6 +1617,13 @@ app.delete('/admin/staff/:id', async (req, res) => {
     }
     
     await deleteStaff(id)
+    
+    // Broadcast staff deletion to all admin panels
+    broadcastAdminUpdate('staff-deleted', {
+      staffId: id,
+      staffName: staff.name,
+      department: staff.department
+    })
     
     return res.json({ success: true, message: 'Staff deleted successfully' })
   } catch (error) {
@@ -1502,6 +1669,14 @@ app.delete('/admin/students/:regNo', async (req, res) => {
     }
     
     await deleteStudent(regNo)
+    
+    // Broadcast student deletion to all admin panels
+    broadcastAdminUpdate('student-deleted', {
+      studentRegNo: regNo,
+      studentName: student.name,
+      department: student.department,
+      year: student.year
+    })
     
     return res.json({ success: true, message: 'Student deleted successfully' })
   } catch (error) {
@@ -1550,7 +1725,7 @@ app.post('/admin/students/add', async (req, res) => {
     }
     
     // Create student
-    await dbCreateStudent({
+    const studentData = {
       regNo,
       studentId,
       name,
@@ -1558,12 +1733,254 @@ app.post('/admin/students/add', async (req, res) => {
       email: email || '',
       department: department || 'M.Tech',
       year: year || '4th Year'
+    }
+    
+    await dbCreateStudent(studentData)
+    
+    // Broadcast student creation to all admin panels
+    broadcastAdminUpdate('student-created', {
+      student: { regNo, studentId, name, department: studentData.department, year: studentData.year }
     })
     
     return res.json({ success: true, message: 'Student added successfully' })
   } catch (error) {
     console.error('Add student error:', error)
     return res.status(500).json({ error: 'internal_error', message: error.message })
+  }
+})
+
+// Hierarchical Access Control APIs
+
+// Assign staff to department-year combination
+app.post('/admin/hierarchy/assign-staff', async (req, res) => {
+  try {
+    const { staffId, department, year, isClassAdvisor = false } = req.body
+    
+    if (!staffId || !department || !year) {
+      return res.status(400).json({ error: 'missing_required_fields' })
+    }
+    
+    // Get current staff record
+    console.log('Looking for staff with ID:', staffId)
+    const staff = await getStaffById(staffId)
+    console.log('Found staff:', staff)
+    if (!staff) {
+      console.log('Staff not found with ID:', staffId)
+      return res.status(404).json({ error: 'staff_not_found' })
+    }
+    
+    // If making class advisor, check if department-year already has one
+    if (isClassAdvisor) {
+      const allStaff = await listStaff()
+      const existingAdvisor = allStaff.find(s => 
+        s.advisorFor?.department === department && 
+        s.advisorFor?.year === year && 
+        s.id !== staffId
+      )
+      
+      if (existingAdvisor) {
+        return res.status(409).json({ 
+          error: 'advisor_exists', 
+          message: `${existingAdvisor.name} is already class advisor for ${department} ${year}` 
+        })
+      }
+    }
+    
+    // Update staff with hierarchical assignments
+    const updates = {
+      assignedDepartments: staff.assignedDepartments || [],
+      assignedYears: staff.assignedYears || [],
+      isClassAdvisor: isClassAdvisor,
+      advisorFor: isClassAdvisor ? { department, year } : staff.advisorFor,
+      accessLevel: isClassAdvisor ? 'class_advisor' : (staff.accessLevel || 'staff')
+    }
+    
+    // Add department and year to assignments if not already present
+    const deptYearKey = `${department}:${year}`
+    if (!updates.assignedDepartments.includes(department)) {
+      updates.assignedDepartments.push(department)
+    }
+    if (!updates.assignedYears.includes(deptYearKey)) {
+      updates.assignedYears.push(deptYearKey)
+    }
+    
+    console.log('Updating staff with:', updates)
+    await updateStaff(staffId, updates)
+    console.log('Staff updated successfully')
+    
+    // Verify the update
+    const updatedStaff = await getStaffById(staffId)
+    console.log('Updated staff record:', updatedStaff)
+    
+    // Broadcast hierarchy update
+    broadcastAdminUpdate('hierarchy-updated', {
+      staffId,
+      staffName: staff.name,
+      department,
+      year,
+      isClassAdvisor,
+      action: 'assigned'
+    })
+    
+    return res.json({ 
+      success: true, 
+      message: `Staff ${isClassAdvisor ? 'assigned as class advisor' : 'assigned'} to ${department} ${year}` 
+    })
+    
+  } catch (error) {
+    console.error('Assign staff error:', error)
+    return res.status(500).json({ error: 'internal_error' })
+  }
+})
+
+// Get hierarchy structure
+app.get('/admin/hierarchy/structure', async (req, res) => {
+  try {
+    const allStaff = await listStaff()
+    const allStudents = await listAllStudents()
+    
+    // Build hierarchy structure
+    const hierarchy = {}
+    
+    // Process students to build department-year structure
+    for (const student of allStudents) {
+      if (student.isYearPlaceholder) continue
+      
+      const dept = student.department || 'M.Tech'
+      const year = student.year || '4th Year'
+      
+      if (!hierarchy[dept]) {
+        hierarchy[dept] = {}
+      }
+      
+      if (!hierarchy[dept][year]) {
+        hierarchy[dept][year] = {
+          classAdvisor: null,
+          staff: [],
+          students: [],
+          studentCount: 0
+        }
+      }
+      
+      hierarchy[dept][year].students.push({
+        regNo: student.regNo,
+        name: student.name,
+        email: student.email,
+        studentId: student.studentId
+      })
+      hierarchy[dept][year].studentCount++
+    }
+    
+    // Process staff assignments
+    console.log('Processing staff for hierarchy:', allStaff.length, 'staff members')
+    for (const staff of allStaff) {
+      if (staff.isDepartmentPlaceholder) continue
+      
+      console.log('Processing staff:', staff.name, 'isClassAdvisor:', staff.isClassAdvisor, 'advisorFor:', staff.advisorFor)
+      
+      // Check if staff is class advisor
+      if (staff.isClassAdvisor && staff.advisorFor) {
+        const { department, year } = staff.advisorFor
+        
+        // Ensure department exists
+        if (!hierarchy[department]) {
+          hierarchy[department] = {}
+        }
+        
+        // Ensure department-year combination exists
+        if (!hierarchy[department][year]) {
+          hierarchy[department][year] = {
+            classAdvisor: null,
+            staff: [],
+            students: [],
+            studentCount: 0
+          }
+        }
+        
+        // Set class advisor
+        hierarchy[department][year].classAdvisor = {
+          id: staff.id,
+          name: staff.name,
+          email: staff.email,
+          designation: staff.designation
+        }
+      }
+      
+      // Add staff to assigned years
+      if (staff.assignedYears) {
+        for (const deptYear of staff.assignedYears) {
+          const [department, year] = deptYear.split(':')
+          
+          // Ensure department exists
+          if (!hierarchy[department]) {
+            hierarchy[department] = {}
+          }
+          
+          // Ensure department-year combination exists
+          if (!hierarchy[department][year]) {
+            hierarchy[department][year] = {
+              classAdvisor: null,
+              staff: [],
+              students: [],
+              studentCount: 0
+            }
+          }
+          
+          hierarchy[department][year].staff.push({
+            id: staff.id,
+            name: staff.name,
+            email: staff.email,
+            designation: staff.designation,
+            isClassAdvisor: staff.isClassAdvisor && 
+              staff.advisorFor?.department === department && 
+              staff.advisorFor?.year === year
+          })
+        }
+      }
+    }
+    
+    console.log('Hierarchy structure generated:', JSON.stringify(hierarchy, null, 2))
+    return res.json({ hierarchy })
+    
+  } catch (error) {
+    console.error('Get hierarchy error:', error)
+    return res.status(500).json({ error: 'internal_error' })
+  }
+})
+
+// Check access permissions for QR scanning
+app.post('/attendance/check-access', async (req, res) => {
+  try {
+    const { studentId, sessionDepartment, sessionYear } = req.body
+    
+    if (!studentId || !sessionDepartment || !sessionYear) {
+      return res.status(400).json({ error: 'missing_required_fields' })
+    }
+    
+    // Get student details
+    const student = await dbGetStudentByRegNo(studentId)
+    if (!student) {
+      return res.status(404).json({ error: 'student_not_found' })
+    }
+    
+    // Check if student belongs to the same department and year
+    const studentDept = student.department || 'M.Tech'
+    const studentYear = student.year || '4th Year'
+    
+    const hasAccess = studentDept === sessionDepartment && studentYear === sessionYear
+    
+    return res.json({ 
+      hasAccess,
+      studentDepartment: studentDept,
+      studentYear: studentYear,
+      sessionDepartment,
+      sessionYear,
+      message: hasAccess ? 'Access granted' : 'Access denied - wrong department or year'
+    })
+    
+  } catch (error) {
+    console.error('Check access error:', error)
+    return res.status(500).json({ error: 'internal_error' })
   }
 })
 
@@ -1594,6 +2011,205 @@ app.put('/admin/settings', async (req, res) => {
 })
 
 // Department Navigation APIs
+
+// Test endpoint
+app.get('/admin/departments/test', (req, res) => {
+  res.json({ message: 'Department API is working' })
+})
+
+// Test endpoint for years
+app.get('/admin/years/test', (req, res) => {
+  res.json({ message: 'Years API is working' })
+})
+
+// Create a new empty year in a department
+app.post('/admin/years/create', async (req, res) => {
+  console.log('=== YEAR CREATION START ===')
+  console.log('Year creation request received:', req.body)
+  console.log('Request headers:', req.headers['content-type'])
+  
+  try {
+    const { department, year } = req.body
+    
+    if (!department || !department.trim()) {
+      console.log('Missing department name')
+      return res.status(400).json({ error: 'Department name is required' })
+    }
+    
+    if (!year || !year.trim()) {
+      console.log('Missing year name')
+      return res.status(400).json({ error: 'Year is required' })
+    }
+    
+    console.log(`Creating year: ${year} in department: ${department}`)
+    
+    // Check if year already exists in this department
+    const allStudents = await listAllStudents()
+    const existingYearInDept = allStudents.some(student => 
+      student.department === department && student.year === year
+    )
+    
+    if (existingYearInDept) {
+      console.log('Year already exists in department:', year, department)
+      return res.status(400).json({ error: `Year "${year}" already exists in department "${department}"` })
+    }
+    
+    // Create a year placeholder using student creation method
+    const placeholderRegNo = `year_${department.toLowerCase().replace(/\s+/g, '')}_${year.toLowerCase().replace(/\s+/g, '')}_placeholder`
+    console.log('Creating placeholder with regNo:', placeholderRegNo)
+    
+    // Check if placeholder already exists
+    const existing = await dbGetStudentByRegNo(placeholderRegNo)
+    if (existing) {
+      console.log('Year placeholder already exists')
+      return res.status(400).json({ error: `Year "${year}" already exists in department "${department}"` })
+    }
+    
+    // Create year placeholder
+    console.log('Creating student placeholder for year...')
+    try {
+      const student = await dbCreateStudent({
+        regNo: placeholderRegNo,
+        studentId: placeholderRegNo,
+        name: `[Year: ${year} - ${department}]`,
+        password: 'system_placeholder',
+        email: `year.${department.toLowerCase().replace(/\s+/g, '')}.${year.toLowerCase().replace(/\s+/g, '')}.placeholder@system.internal`,
+        department: department,
+        year: year,
+        status: 'placeholder',
+        isPlaceholder: true,
+        isYearPlaceholder: true,
+        createdAt: new Date().toISOString()
+      })
+      
+      console.log('Year placeholder created:', student)
+    } catch (studentError) {
+      console.error('Student creation error:', studentError)
+      return res.status(500).json({ error: 'Failed to create year placeholder: ' + studentError.message })
+    }
+    
+    console.log('Year created successfully:', year, 'in', department)
+    
+    const response = { 
+      success: true, 
+      message: `Year "${year}" created successfully in department "${department}"`,
+      year: {
+        name: year,
+        department: department,
+        students: { total: 0 }
+      }
+    }
+    
+    console.log('Sending response:', response)
+    console.log('=== YEAR CREATION END ===')
+    
+    // Broadcast year creation to all admin panels
+    broadcastAdminUpdate('year-created', {
+      department: department,
+      year: year
+    })
+    
+    return res.json(response)
+    
+  } catch (error) {
+    console.error('Create year error:', error)
+    console.error('Error stack:', error.stack)
+    return res.status(500).json({ error: 'Internal server error: ' + error.message })
+  }
+})
+
+// Create a new empty department
+app.post('/admin/departments/create', async (req, res) => {
+  console.log('Department creation request received:', req.body)
+  
+  try {
+    const { name } = req.body
+    
+    if (!name || !name.trim()) {
+      console.log('Missing department name')
+      return res.status(400).json({ error: 'Department name is required' })
+    }
+    
+    console.log('Creating department:', name.trim())
+    
+    // Check if department already exists
+    console.log('Checking existing departments...')
+    const allStudents = await listAllStudents()
+    const allStaff = await listStaff()
+    const existingDepts = new Set()
+    
+    allStudents.forEach(student => {
+      if (student.department) existingDepts.add(student.department.toLowerCase())
+    })
+    allStaff.forEach(staff => {
+      if (staff.department) existingDepts.add(staff.department.toLowerCase())
+    })
+    
+    console.log('Existing departments:', Array.from(existingDepts))
+    
+    if (existingDepts.has(name.trim().toLowerCase())) {
+      console.log('Department already exists:', name.trim())
+      return res.status(400).json({ error: 'Department already exists' })
+    }
+    
+    // Create a simple department placeholder using the staff creation method
+    const placeholderEmail = `dept.${name.toLowerCase().replace(/\s+/g, '')}.placeholder@system.internal`
+    console.log('Creating placeholder with email:', placeholderEmail)
+    
+    // Check if placeholder email already exists
+    const existing = await getStaffByEmail(placeholderEmail)
+    if (existing) {
+      console.log('Placeholder already exists')
+      return res.status(400).json({ error: 'Department already exists' })
+    }
+    
+    // Create department placeholder
+    console.log('Creating staff placeholder...')
+    try {
+      const staff = await createStaff({
+        id: placeholderEmail,
+        name: `[Department: ${name.trim()}]`,
+        email: placeholderEmail,
+        password: 'system_placeholder',
+        department: name.trim(),
+        designation: 'Department Placeholder',
+        contact: '',
+        status: 'Active',
+        isPlaceholder: true,
+        isDepartmentPlaceholder: true,
+        joiningDate: Date.now()
+      })
+      
+      console.log('Staff placeholder created:', staff)
+    } catch (staffError) {
+      console.error('Staff creation error:', staffError)
+      return res.status(500).json({ error: 'Failed to create department placeholder: ' + staffError.message })
+    }
+    
+    console.log('Department created successfully:', name.trim())
+    
+    // Broadcast department creation to all admin panels
+    broadcastAdminUpdate('department-created', {
+      name: name.trim()
+    })
+    
+    return res.json({ 
+      success: true, 
+      message: `Department "${name.trim()}" created successfully`,
+      department: {
+        name: name.trim(),
+        staff: { total: 0 },
+        students: { total: 0, byYear: {} }
+      }
+    })
+    
+  } catch (error) {
+    console.error('Create department error:', error)
+    console.error('Error stack:', error.stack)
+    return res.status(500).json({ error: 'Internal server error: ' + error.message })
+  }
+})
+
 app.get('/admin/departments/summary', async (req, res) => {
   try {
     const allStudents = await listAllStudents()
@@ -1619,28 +2235,36 @@ app.get('/admin/departments/summary', async (req, res) => {
         departments[dept].students.byYear[year] = 0
       }
       
-      departments[dept].students.total++
-      departments[dept].students.byYear[year]++
+      // Don't count year placeholders in the total
+      if (!student.isYearPlaceholder) {
+        departments[dept].students.total++
+        departments[dept].students.byYear[year]++
+      }
     }
     
     // Process staff
     for (const staff of allStaff) {
-      const dept = staff.department || 'Computer Science'
+      if (!staff.department) continue
       
+      const dept = staff.department
       if (!departments[dept]) {
         departments[dept] = {
           name: dept,
-          students: { total: 0, byYear: {} },
-          staff: { total: 0 }
+          staff: { total: 0 },
+          students: { total: 0, byYear: {} }
         }
       }
       
-      departments[dept].staff.total++
+      // Don't count placeholder staff in the total
+      if (!staff.isDepartmentPlaceholder) {
+        departments[dept].staff.total++
+      }
     }
     
     return res.json({ departments: Object.values(departments) })
   } catch (error) {
     console.error('Department summary error:', error)
+    console.error('Error stack:', error.stack)
     return res.status(500).json({ error: 'internal_error' })
   }
 })
@@ -1652,6 +2276,10 @@ app.get('/admin/students/by-department', async (req, res) => {
     const allStudents = await listAllStudents()
     
     let filtered = allStudents
+    
+    // Filter out year placeholders from student lists
+    filtered = filtered.filter(s => !s.isYearPlaceholder)
+    
     if (department && department !== 'All') {
       filtered = filtered.filter(s => (s.department || 'M.Tech') === department)
     }
@@ -1782,10 +2410,22 @@ function calculateDuration(startDate, endDate) {
 // Serve frontend build (same-origin) if available
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const distPath = path.resolve(__dirname, '../dist')
-app.use(express.static(distPath))
-app.get('*', (req, res) => {
-  res.sendFile(path.join(distPath, 'index.html'))
-})
+
+// Only serve static files if dist folder exists (production mode)
+import fs from 'fs'
+if (fs.existsSync(distPath)) {
+  console.log('Serving static files from dist folder (production mode)')
+  app.use(express.static(distPath))
+  app.get('*', (req, res) => {
+    res.sendFile(path.join(distPath, 'index.html'))
+  })
+} else {
+  console.log('Dist folder not found - running in development mode')
+  // In development, just serve API endpoints
+  app.get('*', (req, res) => {
+    res.status(404).json({ error: 'API endpoint not found' })
+  })
+}
 
 const PORT = process.env.PORT || 3001
 const HOST = process.env.HOST || '0.0.0.0'

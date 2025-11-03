@@ -70,38 +70,109 @@ export const staffApi = {
 // Admin API functions
 export const adminApi = {
   // Dashboard
-  getDashboardStats: () => apiGet('/admin/dashboard/stats'),
+  getDashboardStats: () => fetch('/admin/dashboard/stats').then(r => r.json()),
   
   // Departments
-  getDepartmentsSummary: () => apiGet('/admin/departments/summary'),
+  testDepartmentAPI: () => fetch('/admin/departments/test').then(r => r.json()),
+  testYearAPI: () => fetch('/admin/years/test').then(r => r.json()),
+  createDepartment: (name) => {
+    return fetch('/admin/departments/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name })
+    }).then(async res => {
+      const text = await res.text()
+      let data = {}
+      
+      try {
+        data = text ? JSON.parse(text) : {}
+      } catch (parseError) {
+        console.error('JSON parse error:', parseError, 'Response text:', text)
+        throw new Error('Invalid response from server')
+      }
+      
+      if (!res.ok) {
+        throw new Error(data.error || `Server error: ${res.status}`)
+      }
+      
+      return data
+    }).catch(error => {
+      console.error('Create department API error:', error)
+      throw error
+    })
+  },
+  createYear: (department, year) => {
+    return fetch('/admin/years/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ department, year })
+    }).then(async res => {
+      const text = await res.text()
+      let data = {}
+      
+      try {
+        data = text ? JSON.parse(text) : {}
+      } catch (parseError) {
+        console.error('JSON parse error:', parseError, 'Response text:', text)
+        throw new Error('Invalid response from server')
+      }
+      
+      if (!res.ok) {
+        throw new Error(data.error || `Server error: ${res.status}`)
+      }
+      
+      return data
+    }).catch(error => {
+      console.error('Create year API error:', error)
+      throw error
+    })
+  },
+  getDepartmentsSummary: () => fetch('/admin/departments/summary').then(r => r.json()),
   getStudentsByDepartment: (department, year) => {
     const params = new URLSearchParams()
     if (department) params.append('department', department)
     if (year) params.append('year', year)
-    return apiGet(`/admin/students/by-department?${params.toString()}`)
+    return fetch(`/admin/students/by-department?${params.toString()}`).then(r => r.json())
   },
-  getStaffByDepartment: (department) => apiGet(`/admin/staff/by-department?department=${department}`),
+  getStaffByDepartment: (department) => fetch(`/admin/staff/by-department?department=${department}`).then(r => r.json()),
   
   // Staff Management
-  getStaffList: () => apiGet('/admin/staff/list'),
+  getStaffList: () => fetch('/admin/staff/list').then(r => r.json()),
   addStaff: (data) => apiPost('/admin/staff/add', data),
   updateStaff: (id, updates) => apiPut(`/admin/staff/${id}`, updates),
-  deleteStaff: (id) => fetch(`${API_BASE}/admin/staff/${id}`, { method: 'DELETE' }).then(r => r.json()),
+  deleteStaff: (id) => fetch(`/admin/staff/${id}`, { method: 'DELETE' }).then(r => r.json()),
   resetStaffPassword: (id, newPassword) => apiPost(`/admin/staff/${id}/reset-password`, { newPassword }),
   
   // Student Management
   createStudent: (data) => apiPost('/admin/students/add', data),
-  deleteStudent: (regNo) => fetch(`${API_BASE}/admin/students/${regNo}`, { method: 'DELETE' }).then(r => r.json()),
+  deleteStudent: (regNo) => fetch(`/admin/students/${regNo}`, { method: 'DELETE' }).then(r => r.json()),
   resetStudentPassword: (regNo, newPassword) => apiPost(`/admin/students/${regNo}/reset-password`, { newPassword }),
   
   // Settings
-  getSettings: () => apiGet('/admin/settings'),
+  getSettings: () => fetch('/admin/settings').then(r => r.json()),
   updateSettings: (updates) => apiPut('/admin/settings', updates),
   
   // Attendance Reports
   getAttendanceReports: (params) => {
     const query = new URLSearchParams(params).toString()
-    return apiGet(`/admin/attendance/reports${query ? '?' + query : ''}`)
+    return fetch(`/admin/attendance/reports${query ? '?' + query : ''}`).then(r => r.json())
+  },
+
+  // Hierarchical Access Control
+  getHierarchyStructure: () => fetch('/admin/hierarchy/structure').then(r => r.json()),
+  assignStaffToHierarchy: (staffId, department, year, isClassAdvisor = false) => {
+    return fetch('/admin/hierarchy/assign-staff', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ staffId, department, year, isClassAdvisor })
+    }).then(r => r.json())
+  },
+  checkStudentAccess: (studentId, sessionDepartment, sessionYear) => {
+    return fetch('/attendance/check-access', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ studentId, sessionDepartment, sessionYear })
+    }).then(r => r.json())
   }
 }
 

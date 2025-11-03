@@ -102,8 +102,15 @@ export async function clearEnrollments(courseId){
 }
 
 // Staff management
-export async function createStaff({ id, name, email, password }){
-  const doc = { id, name, email: email?.toLowerCase(), password }
+export async function createStaff(staffData){
+  const { id, name, email, password, ...otherFields } = staffData
+  const doc = { 
+    id, 
+    name, 
+    email: email?.toLowerCase(), 
+    password,
+    ...otherFields
+  }
   await staffDb.update({ id }, { $set: doc }, { upsert: true })
   return doc
 }
@@ -134,8 +141,15 @@ export async function getStaffCount(){
 }
 
 // Students auth store
-export async function createStudent({ regNo, studentId, name, password }){
-  const doc = { regNo: String(regNo), studentId, name, password }
+export async function createStudent(studentData){
+  const { regNo, studentId, name, password, ...otherFields } = studentData
+  const doc = { 
+    regNo: String(regNo), 
+    studentId, 
+    name, 
+    password,
+    ...otherFields
+  }
   await studentsDb.update({ regNo: doc.regNo }, { $set: doc }, { upsert: true })
   return doc
 }

@@ -25,6 +25,7 @@ export default function AdminLayout(){
     { to: '/admin/dashboard', label: 'Dashboard', icon: '📊' },
     { to: '/admin/staff', label: 'Manage Staff', icon: '👩‍🏫' },
     { to: '/admin/students', label: 'Manage Students', icon: '👨‍🎓' },
+    { to: '/admin/hierarchy', label: 'Hierarchy Management', icon: '🏢' },
     { to: '/admin/attendance', label: 'Attendance Reports', icon: '🗂️' },
     { to: '/admin/leave', label: 'Leave Requests', icon: '📝' },
     { to: '/admin/settings', label: 'Settings', icon: '⚙️' },
