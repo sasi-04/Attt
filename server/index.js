@@ -1714,14 +1714,24 @@ app.post('/admin/students/add', async (req, res) => {
   try {
     const { name, regNo, studentId, email, password, department, year } = req.body
     
+    // Debug logging for name field
+    console.log('=== STUDENT CREATION REQUEST ===')
+    console.log('Full request body:', req.body)
+    console.log('Name field received:', `"${name}"`, 'Length:', name?.length, 'Type:', typeof name)
+    console.log('RegNo:', regNo, 'StudentId:', studentId)
+    
     if (!name || !regNo || !studentId) {
+      console.log('Missing required fields - name:', !!name, 'regNo:', !!regNo, 'studentId:', !!studentId)
       return res.status(400).json({ error: 'missing_required_fields', message: 'Name, RegNo, and StudentId are required' })
     }
     
     // Check if student already exists
+    console.log('Checking for existing student with regNo:', regNo, 'Type:', typeof regNo)
     const existing = await dbGetStudentByRegNo(regNo)
+    console.log('Existing student found:', existing ? 'YES' : 'NO')
     if (existing) {
-      return res.status(400).json({ error: 'student_exists', message: 'A student with this registration number already exists' })
+      console.log('Existing student details:', existing)
+      return res.status(400).json({ error: 'student_exists', message: `A student with this registration number already exists: ${existing.name}` })
     }
     
     // Create student
@@ -1735,7 +1745,10 @@ app.post('/admin/students/add', async (req, res) => {
       year: year || '4th Year'
     }
     
-    await dbCreateStudent(studentData)
+    console.log('Student data being created:', studentData)
+    const createdStudent = await dbCreateStudent(studentData)
+    console.log('Student created successfully:', createdStudent)
+    console.log('Created student name:', `"${createdStudent.name}"`, 'Length:', createdStudent.name?.length)
     
     // Broadcast student creation to all admin panels
     broadcastAdminUpdate('student-created', {

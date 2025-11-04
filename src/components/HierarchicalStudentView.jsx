@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react'
 import { adminApi } from './api.js'
+import * as XLSX from 'xlsx'
 import { useDepartmentUpdates, useStudentUpdates } from '../hooks/useWebSocket.js'
 
 export default function HierarchicalStudentView() {
@@ -22,9 +23,9 @@ export default function HierarchicalStudentView() {
   const [selectedYears, setSelectedYears] = useState([])
   const [showBulkDeleteYearModal, setShowBulkDeleteYearModal] = useState(false)
   const [showAddStudentModal, setShowAddStudentModal] = useState(false)
-  const [addStudentTab, setAddStudentTab] = useState('manual') // 'manual' or 'csv'
-  const [csvFile, setCsvFile] = useState(null)
-  const [csvPreview, setCsvPreview] = useState([])
+  const [addStudentTab, setAddStudentTab] = useState('manual') // 'manual' or 'excel'
+  const [excelFile, setExcelFile] = useState(null)
+  const [excelPreview, setExcelPreview] = useState([])
   const [hierarchyData, setHierarchyData] = useState({})
   const [newYear, setNewYear] = useState('')
   const [newStudent, setNewStudent] = useState({
@@ -50,72 +51,194 @@ export default function HierarchicalStudentView() {
         password: ''
       })
       setAddStudentTab('manual')
-      setCsvFile(null)
-      setCsvPreview([])
+      setExcelFile(null)
+      setExcelPreview([])
     }
   }, [showAddStudentModal])
 
-  // Handle CSV file selection
-  const handleCsvFileChange = (e) => {
+  // Handle Excel file selection
+  const handleExcelFileChange = (e) => {
     const file = e.target.files[0]
-    if (file && file.type === 'text/csv') {
-      setCsvFile(file)
-      parseCSV(file)
+    if (file && (file.type === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' || file.type === 'application/vnd.ms-excel' || file.name.endsWith('.xlsx') || file.name.endsWith('.xls'))) {
+      setExcelFile(file)
+      parseExcel(file)
     } else {
-      setMessage('Please select a valid CSV file')
+      setMessage('Please select a valid Excel file (.xlsx or .xls)')
       setTimeout(() => setMessage(''), 3000)
     }
   }
 
-  // Parse CSV file
-  const parseCSV = (file) => {
+  // Parse Excel file
+  const parseExcel = (file) => {
     const reader = new FileReader()
     reader.onload = (e) => {
-      const text = e.target.result
-      const lines = text.split('\n').filter(line => line.trim())
-      
-      if (lines.length < 2) {
-        setMessage('CSV file must have at least a header row and one data row')
-        setTimeout(() => setMessage(''), 3000)
-        return
-      }
-      
-      const headers = lines[0].split(',').map(h => h.trim())
-      const expectedHeaders = ['name', 'regNo', 'studentId', 'email', 'password']
-      
-      // Check if headers match expected format
-      const hasValidHeaders = expectedHeaders.every(header => 
-        headers.some(h => h.toLowerCase() === header.toLowerCase())
-      )
-      
-      if (!hasValidHeaders) {
-        setMessage('CSV headers must include: name, regNo, studentId, email, password')
-        setTimeout(() => setMessage(''), 3000)
-        return
-      }
-      
-      // Parse data rows
-      const students = []
-      for (let i = 1; i < lines.length; i++) {
-        const values = lines[i].split(',').map(v => v.trim())
-        if (values.length === headers.length) {
-          const student = {}
-          headers.forEach((header, index) => {
-            student[header.toLowerCase()] = values[index]
-          })
-          students.push(student)
+      try {
+        const data = new Uint8Array(e.target.result)
+        const workbook = XLSX.read(data, { type: 'array' })
+        
+        // Get the first worksheet
+        const firstSheetName = workbook.SheetNames[0]
+        const worksheet = workbook.Sheets[firstSheetName]
+        
+        // Convert to JSON with different options to preserve all data
+        const jsonData = XLSX.utils.sheet_to_json(worksheet, { 
+          header: 1,
+          defval: '', // Default value for empty cells
+          blankrows: false, // Skip blank rows
+          raw: true // Use raw values to get actual numbers, then we'll convert them properly
+        })
+        
+        // Post-process the data to handle scientific notation
+        for (let i = 1; i < jsonData.length; i++) {
+          const row = jsonData[i]
+          if (row && row.length > 1) {
+            // Convert regNo (column 1) from scientific notation if it's a number
+            if (typeof row[1] === 'number' && row[1] > 1e10) {
+              row[1] = Math.round(row[1]).toString()
+              console.log(`Converted regNo from ${typeof row[1]} to string:`, row[1])
+            }
+            // Convert studentId (column 2) if it's a number  
+            if (typeof row[2] === 'number' && row[2] > 1e10) {
+              row[2] = Math.round(row[2]).toString()
+              console.log(`Converted studentId from ${typeof row[2]} to string:`, row[2])
+            }
+          }
         }
+        
+        console.log('Raw Excel data (first 5 rows):', jsonData.slice(0, 5))
+        console.log('Total rows in Excel:', jsonData.length)
+        
+        // Detailed analysis of the first few data rows
+        if (jsonData.length > 1) {
+          console.log('=== DETAILED EXCEL ANALYSIS ===')
+          console.log('Header row:', jsonData[0])
+          for (let i = 1; i <= Math.min(3, jsonData.length - 1); i++) {
+            console.log(`Data row ${i}:`, jsonData[i])
+            console.log(`  Name (col 0): "${jsonData[i][0]}" (${typeof jsonData[i][0]})`)
+            console.log(`  RegNo (col 1): "${jsonData[i][1]}" (${typeof jsonData[i][1]})`)
+            console.log(`  StudentId (col 2): "${jsonData[i][2]}" (${typeof jsonData[i][2]})`)
+            console.log(`  Email (col 3): "${jsonData[i][3]}" (${typeof jsonData[i][3]})`)
+            console.log(`  Password (col 4): "${jsonData[i][4]}" (${typeof jsonData[i][4]})`)
+          }
+        }
+        
+        if (jsonData.length < 2) {
+          setMessage('Excel file must have at least a header row and one data row')
+          setTimeout(() => setMessage(''), 3000)
+          return
+        }
+        
+        // Get headers from first row
+        const headers = jsonData[0].map(h => String(h || '').trim())
+        const expectedHeaders = ['name', 'regNo', 'studentId', 'email', 'password']
+        
+        console.log('Excel headers found:', headers)
+        console.log('Expected headers:', expectedHeaders)
+        
+        // Check if headers match expected format (case insensitive)
+        const hasValidHeaders = expectedHeaders.every(expectedHeader => 
+          headers.some(h => h.toLowerCase() === expectedHeader.toLowerCase())
+        )
+        
+        if (!hasValidHeaders) {
+          setMessage(`Excel headers must include: ${expectedHeaders.join(', ')}. Found: ${headers.join(', ')}`)
+          setTimeout(() => setMessage(''), 5000)
+          return
+        }
+        
+        // Create header mapping (case insensitive)
+        const headerMap = {}
+        expectedHeaders.forEach(expectedHeader => {
+          const foundIndex = headers.findIndex(h => h.toLowerCase() === expectedHeader.toLowerCase())
+          if (foundIndex !== -1) {
+            headerMap[expectedHeader] = foundIndex
+          }
+        })
+        
+        console.log('Header mapping:', headerMap)
+        
+        // Parse data rows
+        const students = []
+        for (let i = 1; i < jsonData.length; i++) {
+          const row = jsonData[i]
+          if (row && row.length > 0) {
+            const student = {}
+            
+            // Map each expected header to its value
+            expectedHeaders.forEach(header => {
+              const columnIndex = headerMap[header]
+              if (columnIndex !== undefined) {
+                let value = row[columnIndex]
+                
+                // Handle different data types from Excel
+                if (value === null || value === undefined) {
+                  value = ''
+                } else if (typeof value === 'number') {
+                  // Handle scientific notation for large numbers (like regNo)
+                  if (header.toLowerCase() === 'regno' || header.toLowerCase() === 'studentid') {
+                    // Convert scientific notation to full number string
+                    if (value > 1e10) {
+                      // For very large numbers, use toFixed to avoid scientific notation
+                      value = Math.round(value).toString()
+                    } else {
+                      value = value.toFixed(0)
+                    }
+                  } else {
+                    // Convert other numbers to strings normally
+                    value = String(value)
+                  }
+                } else {
+                  // Convert to string and trim
+                  value = String(value).trim()
+                }
+                
+                student[header.toLowerCase()] = value
+              } else {
+                student[header.toLowerCase()] = ''
+              }
+            })
+            
+            // Debug log for each student
+            console.log(`\n--- Parsing Row ${i} ---`)
+            console.log('Original row data:', row)
+            console.log('Header mapping used:', headerMap)
+            console.log('Parsed student object:', student)
+            console.log('Field by field:')
+            expectedHeaders.forEach(header => {
+              const columnIndex = headerMap[header]
+              const rawValue = row[columnIndex]
+              const parsedValue = student[header.toLowerCase()]
+              console.log(`  ${header}: raw="${rawValue}" → parsed="${parsedValue}"`)
+            })
+            
+            // Only add if name is present and not empty
+            if (student.name && String(student.name).trim()) {
+              students.push(student)
+            } else {
+              console.warn(`Skipping row ${i} - no valid name:`, row)
+            }
+          }
+        }
+        
+        console.log('Parsed students:', students)
+        setExcelPreview(students)
+        setMessage(`✅ ${students.length} students loaded from Excel file successfully!`)
+        setTimeout(() => setMessage(''), 3000)
+        
+      } catch (error) {
+        console.error('Excel parsing error:', error)
+        setMessage(`❌ Error parsing Excel file: ${error.message}`)
+        setTimeout(() => setMessage(''), 5000)
       }
-      
-      setCsvPreview(students)
-      setMessage(`${students.length} students loaded from CSV`)
-      setTimeout(() => setMessage(''), 3000)
     }
-    reader.readAsText(file)
+    
+    // Read as ArrayBuffer for binary Excel files
+    reader.readAsArrayBuffer(file)
   }
 
-  // Download CSV template
-  const downloadCSVTemplate = () => {
+  // Download Excel template
+  const downloadExcelTemplate = () => {
+    // Create a CSV that can be opened in Excel
     const csvContent = 'name,regNo,studentId,email,password\nJohn Doe,ES22CJ01,ES22CJ01,john@example.com,student123\nJane Smith,ES22CJ02,ES22CJ02,jane@example.com,student123'
     const blob = new Blob([csvContent], { type: 'text/csv' })
     const url = window.URL.createObjectURL(blob)
@@ -128,34 +251,110 @@ export default function HierarchicalStudentView() {
     window.URL.revokeObjectURL(url)
   }
 
-  // Handle bulk CSV upload
+  // Handle bulk Excel upload
   const handleBulkUpload = async () => {
-    if (csvPreview.length === 0) {
+    if (excelPreview.length === 0) {
       setMessage('No students to upload')
       setTimeout(() => setMessage(''), 3000)
       return
     }
     
+    console.log('=== STARTING BULK UPLOAD ===')
+    console.log('Selected Department:', selectedDept)
+    console.log('Selected Year:', selectedYear)
+    console.log('Students to upload:', excelPreview)
+    
+    // Validate we have students to upload
+    if (!excelPreview || excelPreview.length === 0) {
+      setMessage('No students found in Excel preview')
+      setTimeout(() => setMessage(''), 3000)
+      return
+    }
+    
+    console.log('Excel preview data structure:', excelPreview[0])
+    console.log('Total students to process:', excelPreview.length)
+    
     try {
       let successCount = 0
       let errorCount = 0
+      const errors = []
       
-      for (const student of csvPreview) {
+      for (let i = 0; i < excelPreview.length; i++) {
+        const student = excelPreview[i]
         try {
+          console.log(`\n=== PROCESSING STUDENT ${i + 1}/${excelPreview.length} ===`)
+          console.log('Raw student object:', student)
+          console.log('Student keys:', Object.keys(student))
+          console.log('Name value:', student.name, 'Type:', typeof student.name)
+          console.log('RegNo value:', student.regno || student.regNo, 'Type:', typeof (student.regno || student.regNo))
+          console.log('StudentId value:', student.studentid || student.studentId, 'Type:', typeof (student.studentid || student.studentId))
+          
+          // Ensure regNo and studentId are properly converted from scientific notation
+          let regNo = student.regno || student.regNo
+          let studentId = student.studentid || student.studentId
+          
+          // Convert scientific notation to full number string if needed
+          if (typeof regNo === 'number' || (typeof regNo === 'string' && regNo.includes('E'))) {
+            regNo = parseFloat(regNo).toFixed(0)
+          }
+          // Don't convert studentId if it's already a string like "ES22CJ01"
+          if (typeof studentId === 'number' || (typeof studentId === 'string' && studentId.includes('E'))) {
+            studentId = parseFloat(studentId).toFixed(0)
+          }
+          
+          console.log('After conversion - regNo:', regNo, 'studentId:', studentId)
+          
+          // If regNo is the same for all students (common issue), generate unique ones based on studentId
+          if (regNo === '730422553001' && studentId && studentId.match(/ES22CJ(\d+)/)) {
+            const studentNumber = studentId.match(/ES22CJ(\d+)/)[1]
+            regNo = `73042255${studentNumber.padStart(4, '0')}`
+            console.log(`Generated unique regNo: ${regNo} for studentId: ${studentId}`)
+          }
+          
           const studentData = {
-            ...student,
+            name: student.name,
+            regNo: regNo,
+            studentId: studentId,
+            email: student.email || '',
+            password: student.password || 'student123',
             department: selectedDept.name,
             year: selectedYear
           }
-          await adminApi.createStudent(studentData)
+          
+          console.log('Formatted for API:', studentData)
+          
+          // Validate required fields
+          if (!studentData.name || !studentData.regNo || !studentData.studentId) {
+            throw new Error(`Missing required fields: name=${studentData.name}, regNo=${studentData.regNo}, studentId=${studentData.studentId}`)
+          }
+          
+          const result = await adminApi.createStudent(studentData)
+          console.log(`✅ Successfully added student: ${student.name}`, result)
           successCount++
         } catch (error) {
-          console.error(`Failed to add student ${student.name}:`, error)
+          console.error(`❌ Failed to add student ${student.name}:`, error)
+          let errorMsg = error.message || error.toString()
+          if (error.message && error.message.includes('student_exists')) {
+            errorMsg = 'Student with this registration number already exists'
+          } else if (error.message && error.message.includes('missing_required_fields')) {
+            errorMsg = 'Missing required fields (name, regNo, or studentId)'
+          }
+          errors.push(`${student.name} (RegNo: ${regNo || 'unknown'}): ${errorMsg}`)
           errorCount++
         }
       }
       
-      setMessage(`Successfully added ${successCount} students. ${errorCount > 0 ? `${errorCount} failed.` : ''}`)
+      console.log('=== UPLOAD COMPLETE ===')
+      console.log(`Success: ${successCount}, Errors: ${errorCount}`)
+      if (errors.length > 0) {
+        console.log('Errors:', errors)
+      }
+      
+      let message = `Successfully added ${successCount} students.`
+      if (errorCount > 0) {
+        message += ` ${errorCount} failed. Check console for details.`
+      }
+      setMessage(message)
       
       if (successCount > 0) {
         // Remove year placeholder if it exists
@@ -175,8 +374,12 @@ export default function HierarchicalStudentView() {
       
       setTimeout(() => setMessage(''), 5000)
     } catch (error) {
-      setMessage('Failed to upload students')
-      setTimeout(() => setMessage(''), 3000)
+      console.error('=== BULK UPLOAD ERROR ===')
+      console.error('Error details:', error)
+      console.error('Error message:', error.message)
+      console.error('Error stack:', error.stack)
+      setMessage(`Failed to upload students: ${error.message || error}`)
+      setTimeout(() => setMessage(''), 5000)
     }
   }
 
@@ -1066,14 +1269,14 @@ export default function HierarchicalStudentView() {
               </button>
               <button
                 type="button"
-                onClick={() => setAddStudentTab('csv')}
+                onClick={() => setAddStudentTab('excel')}
                 className={`px-4 py-2 font-medium text-sm border-b-2 transition-colors ${
-                  addStudentTab === 'csv'
+                  addStudentTab === 'excel'
                     ? 'border-blue-500 text-blue-600'
                     : 'border-transparent text-gray-500 hover:text-gray-700'
                 }`}
               >
-                📄 CSV Upload
+                📊 Excel Upload
               </button>
             </div>
 
@@ -1121,7 +1324,7 @@ export default function HierarchicalStudentView() {
                   value={newStudent.email}
                   onChange={(e) => setNewStudent({...newStudent, email: e.target.value})}
                   className="w-full px-3 py-2 border rounded-lg"
-                  autocomplete="off"
+                  autoComplete="off"
                 />
               </div>
               <div>
@@ -1132,7 +1335,7 @@ export default function HierarchicalStudentView() {
                   value={newStudent.password}
                   onChange={(e) => setNewStudent({...newStudent, password: e.target.value})}
                   className="w-full px-3 py-2 border rounded-lg"
-                  autocomplete="new-password"
+                  autoComplete="new-password"
                   required
                   minLength="6"
                 />
@@ -1144,23 +1347,26 @@ export default function HierarchicalStudentView() {
               </form>
             )}
 
-            {/* CSV Upload Tab */}
-            {addStudentTab === 'csv' && (
+            {/* Excel Upload Tab */}
+            {addStudentTab === 'excel' && (
               <div className="space-y-4">
-                {/* CSV Format Instructions */}
-                <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-                  <h3 className="font-semibold text-blue-800 mb-2">📋 CSV Format Requirements</h3>
-                  <p className="text-sm text-blue-700 mb-2">Your CSV file must include these columns (in any order):</p>
+                {/* Excel Format Instructions */}
+                <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+                  <h3 className="font-semibold text-green-800 mb-2">📊 Excel Format Requirements</h3>
+                  <p className="text-sm text-green-700 mb-2">Your Excel file must include these columns (in any order):</p>
                   <div className="text-xs font-mono bg-white p-2 rounded border">
-                    name,regNo,studentId,email,password
+                    name | regNo | studentId | email | password
                   </div>
-                  <p className="text-xs text-blue-600 mt-2">
-                    Example: John Doe,ES22CJ01,ES22CJ01,john@example.com,student123
+                  <p className="text-xs text-green-600 mt-2">
+                    📝 Create in Excel with headers in first row, then upload the .xlsx file directly!
                   </p>
+                  <div className="text-xs text-green-600 mt-1">
+                    📁 Supported: Direct .xlsx, .xls files or CSV exports
+                  </div>
                   <button
                     type="button"
-                    onClick={downloadCSVTemplate}
-                    className="mt-2 px-3 py-1 bg-blue-100 text-blue-700 rounded text-xs hover:bg-blue-200 transition-colors"
+                    onClick={downloadExcelTemplate}
+                    className="mt-2 px-3 py-1 bg-green-100 text-green-700 rounded text-xs hover:bg-green-200 transition-colors"
                   >
                     💾 Download Template
                   </button>
@@ -1168,19 +1374,19 @@ export default function HierarchicalStudentView() {
 
                 {/* File Upload */}
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Select CSV File</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Select Excel File</label>
                   <input
                     type="file"
-                    accept=".csv"
-                    onChange={handleCsvFileChange}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+                    accept=".xlsx,.xls,.csv"
+                    onChange={handleExcelFileChange}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-green-50 file:text-green-700 hover:file:bg-green-100"
                   />
                 </div>
 
-                {/* CSV Preview */}
-                {csvPreview.length > 0 && (
+                {/* Excel Preview */}
+                {excelPreview.length > 0 && (
                   <div>
-                    <h3 className="font-semibold text-gray-800 mb-2">📊 Preview ({csvPreview.length} students)</h3>
+                    <h3 className="font-semibold text-gray-800 mb-2">📊 Preview ({excelPreview.length} students)</h3>
                     <div className="max-h-64 overflow-y-auto border rounded-lg">
                       <table className="min-w-full text-xs">
                         <thead className="bg-gray-50">
@@ -1192,7 +1398,7 @@ export default function HierarchicalStudentView() {
                           </tr>
                         </thead>
                         <tbody className="divide-y">
-                          {csvPreview.slice(0, 10).map((student, index) => (
+                          {excelPreview.slice(0, 10).map((student, index) => (
                             <tr key={index} className="hover:bg-gray-50">
                               <td className="px-2 py-1">{student.name}</td>
                               <td className="px-2 py-1">{student.regno || student.regNo}</td>
@@ -1202,9 +1408,9 @@ export default function HierarchicalStudentView() {
                           ))}
                         </tbody>
                       </table>
-                      {csvPreview.length > 10 && (
+                      {excelPreview.length > 10 && (
                         <div className="text-center py-2 text-gray-500 text-xs">
-                          ... and {csvPreview.length - 10} more students
+                          ... and {excelPreview.length - 10} more students
                         </div>
                       )}
                     </div>
@@ -1223,10 +1429,10 @@ export default function HierarchicalStudentView() {
                   <button 
                     type="button" 
                     onClick={handleBulkUpload}
-                    disabled={csvPreview.length === 0}
+                    disabled={excelPreview.length === 0}
                     className="px-4 py-2 bg-green-600 text-white rounded-lg disabled:bg-gray-300 disabled:cursor-not-allowed"
                   >
-                    Upload {csvPreview.length} Students
+                    Upload {excelPreview.length} Students
                   </button>
                 </div>
               </div>

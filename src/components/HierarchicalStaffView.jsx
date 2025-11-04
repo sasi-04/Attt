@@ -706,7 +706,6 @@ export default function HierarchicalStaffView() {
                     e.stopPropagation()
                   }}
                   className="w-full px-3 py-2 border rounded-lg" 
-                  autocomplete="new-email" 
                   autoComplete="new-email"
                   required 
                 />
@@ -728,7 +727,6 @@ export default function HierarchicalStaffView() {
                     e.stopPropagation()
                   }}
                   className="w-full px-3 py-2 border rounded-lg" 
-                  autocomplete="new-password" 
                   autoComplete="new-password"
                   required 
                 />
