@@ -21,7 +21,7 @@ export default function StaffLayout(){
       <div className="flex min-h-screen">
         <Sidebar items={items} title="Attendance" subtitle="Staff Panel" />
         <main className="flex-1">
-          <Topbar name={user?.name} role="Staff" right={<button onClick={logout} className="px-3 py-1.5 rounded-md bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 dark:text-white text-sm transition-colors">Logout</button>} />
+          <Topbar name={user?.name} role={user?.isClassAdvisor ? "Class Advisor" : "Staff"} right={<button onClick={logout} className="px-3 py-1.5 rounded-md bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 dark:text-white text-sm transition-colors">Logout</button>} />
           <div className="p-6">
             <Outlet />
           </div>

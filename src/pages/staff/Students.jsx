@@ -1,8 +1,8 @@
 import React from 'react'
-import StudentTable from '../../components/StudentTable.jsx'
+import StaffDepartmentView from '../../components/StaffDepartmentView.jsx'
 
 export default function Students(){
-  return <StudentTable />
+  return <StaffDepartmentView />
 }
 
 

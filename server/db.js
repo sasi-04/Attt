@@ -68,6 +68,7 @@ export async function getPresentCount(sessionId){
 
 // Enrollment management
 export function enrollStudent(courseId, studentId, name, regNo){
+  initDb()
   const doc = { courseId, studentId }
   if (typeof name === 'string' && name.trim()) doc.name = name.trim()
   if (typeof regNo === 'string' && regNo.trim()) doc.regNo = regNo.trim()
@@ -99,6 +100,11 @@ export function setEnrollmentName(courseId, studentId, name){
 
 export async function clearEnrollments(courseId){
   return enrollmentsDb.remove({ courseId }, { multi: true })
+}
+
+export async function getAllEnrollmentRecords(){
+  const rows = await enrollmentsDb.find({})
+  return rows.map(r => ({ studentId: r.studentId, name: r.name, regNo: r.regNo, courseId: r.courseId }))
 }
 
 // Staff management
@@ -289,4 +295,25 @@ export async function updateSystemSettings(updates) {
     { $set: { ...updates, type: 'system', updatedAt: Date.now() } },
     { upsert: true }
   )
+}
+
+// Student database functions
+export async function dbGetStudentByRegNo(regNo) {
+  initDb()
+  return studentsDb.findOne({ regNo: regNo.toUpperCase() })
+}
+
+export async function dbCreateStudent(studentData) {
+  initDb()
+  // Normalize regNo to uppercase for consistency
+  const normalizedData = {
+    ...studentData,
+    regNo: studentData.regNo.toUpperCase()
+  }
+  return studentsDb.insert(normalizedData)
+}
+
+export async function dbUpdateStudentPassword(regNo, newPassword) {
+  initDb()
+  return studentsDb.update({ regNo: regNo.toUpperCase() }, { $set: { password: newPassword } })
 }

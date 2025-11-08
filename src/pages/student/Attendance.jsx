@@ -2,14 +2,20 @@ import React, { useCallback, useRef, useState } from 'react'
 import { useSearchParams, useNavigate } from 'react-router-dom'
 import StudentQrScanner from '../../components/StudentQrScanner.jsx'
 import AutoFullScreenQrScanner from '../../components/AutoFullScreenQrScanner.jsx'
-import { apiPost } from '../../components/api.js'
+import FaceRecognitionCamera from '../../components/FaceRecognitionCamera.jsx'
+import { apiPost, apiGet } from '../../components/api.js'
+import { useAuth } from '../../context/AuthContext.jsx'
 
 export default function StudentScanAttendance(){
+  const { user } = useAuth()
   const [scanState, setScanState] = useState({ status: 'idle', message: '' })
   const [searchParams] = useSearchParams()
   const navigate = useNavigate()
-  const mode = searchParams.get('mode') || 'both' // 'scanner', 'manual', or 'both'
+  const mode = searchParams.get('mode') || 'both' // 'scanner', 'manual', 'face', or 'both'
   const [showFullScreenScanner, setShowFullScreenScanner] = useState(false)
+  const [showFaceRecognition, setShowFaceRecognition] = useState(false)
+  const [currentSessionId, setCurrentSessionId] = useState(null)
+  const [faceServiceStatus, setFaceServiceStatus] = useState(null)
   const inputRef = useRef(null)
 
   const handleModeChange = (newMode) => {
@@ -17,14 +23,73 @@ export default function StudentScanAttendance(){
     if (newMode === 'scanner') {
       // Directly open full screen scanner instead of navigating
       setShowFullScreenScanner(true)
+    } else if (newMode === 'face') {
+      // Check face recognition service and start face recognition
+      checkFaceServiceAndStart()
     } else {
       navigate(`/student/attendance?mode=${newMode}`, { replace: true })
+    }
+  }
+
+  const checkFaceServiceAndStart = async () => {
+    try {
+      setScanState({ status: 'validating', message: 'Checking face recognition service...' })
+      
+      // Check if face recognition service is available
+      const serviceStatus = await apiGet('/face-recognition/status')
+      setFaceServiceStatus(serviceStatus)
+      
+      if (!serviceStatus.service_available) {
+        setScanState({ 
+          status: 'error', 
+          message: 'Face recognition service is not available. Please try QR code or manual entry.' 
+        })
+        return
+      }
+      
+      // For demo purposes, we'll use a mock session ID
+      // In a real app, this would come from an active session
+      const mockSessionId = `S_${Date.now()}`
+      setCurrentSessionId(mockSessionId)
+      setShowFaceRecognition(true)
+      setScanState({ status: 'idle', message: '' })
+      
+    } catch (error) {
+      console.error('Face service check failed:', error)
+      setScanState({ 
+        status: 'error', 
+        message: 'Cannot connect to face recognition service. Please try another method.' 
+      })
     }
   }
 
   const handleCloseScanner = () => {
     setShowFullScreenScanner(false)
     setScanState({ status: 'idle', message: '' })
+  }
+
+  const handleCloseFaceRecognition = () => {
+    setShowFaceRecognition(false)
+    setCurrentSessionId(null)
+    setScanState({ status: 'idle', message: '' })
+  }
+
+  const handleFaceRecognitionSuccess = (result) => {
+    console.log('Face recognition success:', result)
+    setScanState({ 
+      status: 'success', 
+      message: result.alreadyMarked 
+        ? `Already marked present: ${result.studentId}`
+        : `Face recognized! Marked present: ${result.studentId} (${(result.confidence * 100).toFixed(1)}% confidence)`
+    })
+  }
+
+  const handleFaceRecognitionError = (error) => {
+    console.error('Face recognition error:', error)
+    setScanState({ 
+      status: 'error', 
+      message: `Face recognition failed: ${error}` 
+    })
   }
 
   const validateToken = async (token) => {
@@ -56,6 +121,7 @@ export default function StudentScanAttendance(){
     switch(mode) {
       case 'scanner': return 'QR Code Scanner'
       case 'manual': return 'Manual Token Entry'
+      case 'face': return 'Face Recognition'
       default: return 'Select Attendance Method'
     }
   }
@@ -72,10 +138,22 @@ export default function StudentScanAttendance(){
           autoStart={true}
         />
       )}
+
+      {/* Face Recognition Camera Overlay */}
+      {showFaceRecognition && (
+        <FaceRecognitionCamera
+          sessionId={currentSessionId}
+          onRecognitionSuccess={handleFaceRecognitionSuccess}
+          onRecognitionError={handleFaceRecognitionError}
+          onClose={handleCloseFaceRecognition}
+          department={user?.department || "Computer Science"}
+          year={user?.year || "4th Year"}
+        />
+      )}
       {/* Mode Selection Buttons */}
       <div className="bg-white dark:bg-gray-800 rounded-xl shadow-sm p-6">
         <h2 className="text-lg font-semibold text-gray-800 dark:text-gray-200 mb-4">Choose Attendance Method</h2>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <button
             onClick={() => handleModeChange('scanner')}
             className={`flex items-center justify-center gap-3 p-4 rounded-lg transition-colors ${
@@ -107,6 +185,23 @@ export default function StudentScanAttendance(){
             <div className="text-left">
               <div className="font-medium">Manual Token Entry</div>
               <div className="text-sm opacity-75">Enter token code manually</div>
+            </div>
+          </button>
+
+          <button
+            onClick={() => handleModeChange('face')}
+            className={`flex items-center justify-center gap-3 p-4 rounded-lg transition-colors ${
+              mode === 'face' 
+                ? 'bg-purple-600 text-white' 
+                : 'bg-purple-50 dark:bg-purple-900/20 text-purple-600 dark:text-purple-400 hover:bg-purple-100 dark:hover:bg-purple-900/30'
+            }`}
+          >
+            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+            </svg>
+            <div className="text-left">
+              <div className="font-medium">Face Recognition</div>
+              <div className="text-sm opacity-75">Use camera for face detection</div>
             </div>
           </button>
         </div>
@@ -153,11 +248,54 @@ export default function StudentScanAttendance(){
           </div>
         )}
 
+        {/* Face Recognition Section - Show ONLY if mode is 'face' */}
+        {mode === 'face' && (
+          <div className="mb-6">
+            <div className="bg-purple-50 dark:bg-purple-900/20 rounded-lg p-6">
+              <div className="text-center space-y-4">
+                <div className="text-purple-600 dark:text-purple-400">
+                  <svg className="w-16 h-16 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                  </svg>
+                </div>
+                <h3 className="text-lg font-medium text-purple-800 dark:text-purple-200">Face Recognition Attendance</h3>
+                <p className="text-sm text-purple-600 dark:text-purple-300 mb-4">
+                  Click the button below to start face recognition. Make sure you have good lighting and look directly at the camera.
+                </p>
+                <button
+                  onClick={() => checkFaceServiceAndStart()}
+                  disabled={scanState.status === 'validating'}
+                  className="px-8 py-4 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors font-medium text-lg disabled:bg-gray-400"
+                >
+                  {scanState.status === 'validating' ? (
+                    <div className="flex items-center gap-2">
+                      <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
+                      Checking Service...
+                    </div>
+                  ) : (
+                    <>👤 Start Face Recognition</>
+                  )}
+                </button>
+                {faceServiceStatus && (
+                  <div className="mt-3 text-xs text-purple-600 dark:text-purple-300">
+                    Service Status: {faceServiceStatus.service_available ? '✅ Available' : '❌ Unavailable'}
+                    {faceServiceStatus.service_status && (
+                      <span className="ml-2">
+                        ({faceServiceStatus.service_status.enrolled_students} students enrolled)
+                      </span>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Default message when no mode is selected */}
         {mode === 'both' && (
           <div className="text-center py-8">
             <div className="text-gray-500 mb-2">👆 Please select an attendance method above</div>
-            <div className="text-sm text-gray-400">Choose QR Scanner or Manual Token Entry to mark your attendance</div>
+            <div className="text-sm text-gray-400">Choose QR Scanner, Face Recognition, or Manual Token Entry to mark your attendance</div>
           </div>
         )}
 

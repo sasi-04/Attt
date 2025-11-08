@@ -6,7 +6,7 @@ import http from 'http'
 import { Server as SocketIOServer } from 'socket.io'
 import path from 'path'
 import { fileURLToPath } from 'url'
-import { initDb, createSession as dbCreateSession, saveToken as dbSaveToken, saveShortCode as dbSaveShortCode, deactivateToken as dbDeactivateToken, deleteShortCode as dbDeleteShortCode, markPresent as dbMarkPresent, enrollStudent as dbEnrollStudent, unenrollStudent as dbUnenrollStudent, getEnrollments as dbGetEnrollments, isEnrolled as dbIsEnrolled, getEnrollmentRecords as dbGetEnrollmentRecords, createStudent as dbCreateStudent, getStudentByRegNo as dbGetStudentByRegNo, updateStudentPassword as dbUpdateStudentPassword, createStaff, getStaffByEmail, getStaffById, listStaff, updateStaff, deleteStaff, getStaffCount, listAllStudents, updateStudent, deleteStudent, getStudentCount, getStudentAttendance, getAllAttendanceRecords, getSessionById, getAllSessions, createLeaveRequest, getAllLeaveRequests, getLeaveRequestsByStudent, getLeaveRequestsByStatus, updateLeaveStatus, deleteLeaveRequest, getSystemSettings, updateSystemSettings } from './db.js'
+import { initDb, createSession as dbCreateSession, saveToken as dbSaveToken, saveShortCode as dbSaveShortCode, deactivateToken as dbDeactivateToken, deleteShortCode as dbDeleteShortCode, markPresent as dbMarkPresent, enrollStudent, unenrollStudent, getEnrollments as dbGetEnrollments, isEnrolled as dbIsEnrolled, getEnrollmentRecords as dbGetEnrollmentRecords, getAllEnrollmentRecords, createStudent, getStudentByRegNo, dbGetStudentByRegNo, dbCreateStudent, dbUpdateStudentPassword, createStaff, getStaffByEmail, getStaffById, listStaff, updateStaff, deleteStaff, getStaffCount, listAllStudents, updateStudent, deleteStudent, getStudentCount, getStudentAttendance, getAllAttendanceRecords, getSessionById, getAllSessions, createLeaveRequest, getAllLeaveRequests, getLeaveRequestsByStudent, getLeaveRequestsByStatus, updateLeaveStatus, deleteLeaveRequest, getSystemSettings, updateSystemSettings } from './db.js'
 
 const app = express()
 initDb()
@@ -40,6 +40,462 @@ function broadcastAdminUpdate(eventType, data) {
 
 app.use(cors({ origin: allowedOrigins }))
 app.use(express.json())
+
+// Debug endpoint to check what's connected vs what should be connected
+app.get('/debug/connection-status', async (req, res) => {
+  try {
+    const kiruthikaEmail = 'kiruthika@demo.com'
+    const courseId = '21CS701'
+    
+    // Get admin students (what SHOULD be connected)
+    const adminStudents = await listAllStudents()
+    
+    // Get enrolled students (what IS currently connected)
+    const enrollmentRecords = await dbGetEnrollmentRecords(courseId)
+    
+    // Get Kiruthika's assignment
+    const kiruthika = await getStaffByEmail(kiruthikaEmail)
+    
+    // Find students that are enrolled but NOT in admin
+    const enrolledNotInAdmin = enrollmentRecords.filter(enrollment => {
+      return !adminStudents.find(admin => admin.regNo === enrollment.regNo)
+    })
+    
+    // Find admin students that are NOT enrolled
+    const adminNotEnrolled = adminStudents.filter(admin => {
+      return !enrollmentRecords.find(enrollment => enrollment.regNo === admin.regNo)
+    })
+    
+    return res.json({
+      kiruthikaAssignment: kiruthika?.advisorFor,
+      adminStudents: {
+        count: adminStudents.length,
+        students: adminStudents.map(s => ({ regNo: s.regNo, name: s.name }))
+      },
+      currentlyEnrolled: {
+        count: enrollmentRecords.length,
+        students: enrollmentRecords.map(e => ({ regNo: e.regNo, name: e.name, studentId: e.studentId }))
+      },
+      problems: {
+        enrolledButNotInAdmin: {
+          count: enrolledNotInAdmin.length,
+          students: enrolledNotInAdmin.map(e => ({ regNo: e.regNo, name: e.name, studentId: e.studentId }))
+        },
+        adminButNotEnrolled: {
+          count: adminNotEnrolled.length,
+          students: adminNotEnrolled.map(s => ({ regNo: s.regNo, name: s.name }))
+        }
+      },
+      isClean: enrolledNotInAdmin.length === 0 && adminNotEnrolled.length === 0
+    })
+  } catch (error) {
+    return res.status(500).json({ error: error.message })
+  }
+})
+
+// Debug endpoint to check database contents
+app.get('/debug/students', async (req, res) => {
+  try {
+    const allStudents = await listAllStudents()
+    const enrollmentRecords = await dbGetEnrollmentRecords('21CS701')
+    
+    // Check Kiruthika's students specifically
+    const kiruthikaEmail = 'kiruthika@demo.com'
+    const kiruthika = await getStaffByEmail(kiruthikaEmail)
+    let kiruthikaStudents = []
+    
+    if (kiruthika && kiruthika.isClassAdvisor && kiruthika.advisorFor) {
+      kiruthikaStudents = allStudents.filter(s => {
+        const dept = s.department || 'M.Tech'
+        const year = s.year || '4th Year'
+        return dept === kiruthika.advisorFor.department && year === kiruthika.advisorFor.year
+      })
+    }
+    
+    return res.json({
+      studentsInDb: allStudents.length,
+      enrollmentsInDb: enrollmentRecords.length,
+      kiruthikaInfo: {
+        email: kiruthikaEmail,
+        isClassAdvisor: kiruthika?.isClassAdvisor,
+        advisorFor: kiruthika?.advisorFor,
+        studentsCount: kiruthikaStudents.length,
+        students: kiruthikaStudents.map(s => ({ 
+          regNo: s.regNo, 
+          name: s.name, 
+          department: s.department, 
+          year: s.year 
+        }))
+      },
+      students: allStudents.map(s => ({ 
+        regNo: s.regNo, 
+        name: s.name, 
+        studentId: s.studentId, 
+        department: s.department, 
+        year: s.year 
+      })),
+      enrollments: enrollmentRecords.map(e => ({ studentId: e.studentId, name: e.name, regNo: e.regNo }))
+    })
+  } catch (error) {
+    return res.status(500).json({ error: error.message })
+  }
+})
+
+// Debug endpoint to manually enroll all students
+app.post('/debug/enroll-all', async (req, res) => {
+  try {
+    const allStudents = await listAllStudents()
+    const courseId = '21CS701'
+    let enrolled = 0
+    
+    for (const student of allStudents) {
+      try {
+        await enrollStudent(courseId, student.studentId, student.name, student.regNo)
+        enrolled++
+      } catch (error) {
+        console.error('Error enrolling student:', student.regNo, error)
+      }
+    }
+    
+    return res.json({ 
+      message: `Enrolled ${enrolled} out of ${allStudents.length} students`,
+      enrolled,
+      total: allStudents.length
+    })
+  } catch (error) {
+    return res.status(500).json({ error: error.message })
+  }
+})
+
+// Update all admin students to match Kiruthika's assignment
+app.post('/debug/update-admin-students', async (req, res) => {
+  try {
+    const kiruthikaEmail = 'kiruthika@demo.com'
+    
+    // Get Kiruthika's advisor assignment
+    const staff = await getStaffByEmail(kiruthikaEmail)
+    if (!staff || !staff.isClassAdvisor || !staff.advisorFor) {
+      return res.status(400).json({ error: 'Staff is not a class advisor' })
+    }
+    
+    const { department, year } = staff.advisorFor
+    console.log(`Updating all admin students to: ${department} ${year}`)
+    
+    const allStudents = await listAllStudents()
+    let updated = 0
+    
+    for (const student of allStudents) {
+      try {
+        // Update all students to match Kiruthika's assignment
+        const updates = {
+          department: department,
+          year: year
+        }
+        await updateStudent(student.regNo, updates)
+        updated++
+        console.log(`Updated student ${student.regNo} to ${department} ${year}`)
+      } catch (error) {
+        console.error('Error updating student:', student.regNo, error)
+      }
+    }
+    
+    return res.json({
+      message: `Updated ${updated} students to match advisor assignment`,
+      advisor: kiruthikaEmail,
+      department,
+      year,
+      updated,
+      total: allStudents.length
+    })
+  } catch (error) {
+    console.error('Update admin students error:', error)
+    return res.status(500).json({ error: error.message })
+  }
+})
+
+// Sync admin students with staff visibility
+app.post('/debug/sync-admin-staff', async (req, res) => {
+  try {
+    const allStudents = await listAllStudents()
+    const courseId = '21CS701'
+    let synced = 0
+    let updated = 0
+    
+    console.log(`Found ${allStudents.length} students in admin database`)
+    
+    for (const student of allStudents) {
+      try {
+        // Ensure student has proper department and year
+        if (!student.department || !student.year) {
+          const updates = {
+            department: student.department || 'M.Tech',
+            year: student.year || '4th Year'
+          }
+          await updateStudent(student.regNo, updates)
+          updated++
+          console.log(`Updated student ${student.regNo} with dept/year`)
+        }
+        
+        // Enroll in course for staff visibility
+        await enrollStudent(courseId, student.studentId || student.regNo, student.name, student.regNo)
+        synced++
+        console.log(`Synced student ${student.regNo}`)
+      } catch (error) {
+        console.error('Error syncing student:', student.regNo, error)
+      }
+    }
+    
+    return res.json({ 
+      message: `Synced ${synced} students, updated ${updated} with dept/year`,
+      synced,
+      updated,
+      total: allStudents.length
+    })
+  } catch (error) {
+    console.error('Sync error:', error)
+    return res.status(500).json({ error: error.message })
+  }
+})
+
+// Get staff advisor info
+app.get('/staff/advisor-info', async (req, res) => {
+  try {
+    const staffEmail = req.headers['x-staff-email'] || req.query.staffEmail
+    
+    if (!staffEmail) {
+      return res.status(400).json({ error: 'staff_email_required' })
+    }
+    
+    const staff = await getStaffByEmail(staffEmail)
+    if (!staff) {
+      return res.status(404).json({ error: 'staff_not_found' })
+    }
+    
+    return res.json({
+      isClassAdvisor: staff.isClassAdvisor || false,
+      advisorFor: staff.advisorFor || null,
+      canAddStudents: staff.isClassAdvisor && staff.advisorFor,
+      assignedDepartment: staff.advisorFor?.department,
+      assignedYear: staff.advisorFor?.year
+    })
+  } catch (error) {
+    console.error('Get staff advisor info error:', error)
+    return res.status(500).json({ error: 'internal_error' })
+  }
+})
+
+// Complete reset - Clear ALL old data and connect only admin students
+app.post('/debug/complete-reset', async (req, res) => {
+  try {
+    const kiruthikaEmail = 'kiruthika@demo.com'
+    const courseId = '21CS701'
+    
+    console.log('=== COMPLETE RESET STARTING ===')
+    
+    // Step 1: Get Kiruthika's advisor info
+    const staff = await getStaffByEmail(kiruthikaEmail)
+    if (!staff || !staff.isClassAdvisor || !staff.advisorFor) {
+      return res.status(400).json({ error: 'Staff is not a class advisor' })
+    }
+    
+    const { department, year } = staff.advisorFor
+    console.log(`Advisor assignment: ${department} ${year}`)
+    
+    // Step 2: COMPLETELY CLEAR the enrollments database
+    console.log('Clearing ALL enrollments...')
+    const allEnrollments = await dbGetEnrollmentRecords(courseId)
+    let totalCleared = 0
+    
+    // Clear all enrollments completely
+    for (const enrollment of allEnrollments) {
+      try {
+        await unenrollStudent(courseId, enrollment.studentId)
+        totalCleared++
+        console.log(`Cleared enrollment: ${enrollment.studentId}`)
+      } catch (error) {
+        console.error('Error clearing enrollment:', enrollment.studentId, error)
+      }
+    }
+    
+    console.log(`Total enrollments cleared: ${totalCleared}`)
+    
+    // Step 3: Get ONLY admin panel students
+    const adminStudents = await listAllStudents()
+    console.log(`Found ${adminStudents.length} students in admin database`)
+    
+    // Step 4: Update ALL admin students to match advisor assignment
+    let updatedStudents = 0
+    for (const student of adminStudents) {
+      try {
+        const updates = {
+          department: department,
+          year: year
+        }
+        await updateStudent(student.regNo, updates)
+        updatedStudents++
+        console.log(`Updated ${student.regNo} to ${department} ${year}`)
+      } catch (error) {
+        console.error('Error updating student:', student.regNo, error)
+      }
+    }
+    
+    // Step 5: Enroll ONLY the admin students
+    let enrolledCount = 0
+    for (const student of adminStudents) {
+      try {
+        await enrollStudent(courseId, student.studentId || student.regNo, student.name, student.regNo)
+        enrolledCount++
+        console.log(`Enrolled admin student: ${student.regNo} - ${student.name}`)
+      } catch (error) {
+        console.error('Error enrolling admin student:', student.regNo, error)
+      }
+    }
+    
+    console.log('=== COMPLETE RESET FINISHED ===')
+    
+    return res.json({
+      message: `Complete reset completed - Only admin students connected`,
+      advisor: kiruthikaEmail,
+      department,
+      year,
+      totalClearedEnrollments: totalCleared,
+      adminStudentsFound: adminStudents.length,
+      studentsUpdated: updatedStudents,
+      studentsEnrolled: enrolledCount,
+      adminStudents: adminStudents.map(s => ({
+        regNo: s.regNo,
+        name: s.name,
+        studentId: s.studentId
+      }))
+    })
+  } catch (error) {
+    console.error('Complete reset error:', error)
+    return res.status(500).json({ error: error.message })
+  }
+})
+
+// Clean and sync advisor student data
+app.post('/debug/clean-advisor-data', async (req, res) => {
+  try {
+    const kiruthikaEmail = 'kiruthika@demo.com'
+    const courseId = '21CS701'
+    
+    // Get Kiruthika's advisor info
+    const staff = await getStaffByEmail(kiruthikaEmail)
+    if (!staff || !staff.isClassAdvisor || !staff.advisorFor) {
+      return res.status(400).json({ error: 'Staff is not a class advisor' })
+    }
+    
+    const { department, year } = staff.advisorFor
+    console.log(`Cleaning data for advisor: ${department} ${year}`)
+    
+    // Step 1: Clear all existing enrollments for this course
+    const allEnrollments = await dbGetEnrollmentRecords(courseId)
+    let clearedCount = 0
+    
+    for (const enrollment of allEnrollments) {
+      try {
+        await unenrollStudent(courseId, enrollment.studentId)
+        clearedCount++
+      } catch (error) {
+        console.error('Error clearing enrollment:', enrollment.studentId, error)
+      }
+    }
+    
+    console.log(`Cleared ${clearedCount} old enrollments`)
+    
+    // Step 2: Get all students from admin panel that match advisor's assignment
+    const allStudents = await listAllStudents()
+    const matchingStudents = allStudents.filter(student => {
+      const studentDept = student.department || 'M.Tech'
+      const studentYear = student.year || '4th Year'
+      return studentDept === department && studentYear === year
+    })
+    
+    console.log(`Found ${matchingStudents.length} students matching ${department} ${year}`)
+    
+    // Step 3: Enroll only the matching students
+    let enrolledCount = 0
+    for (const student of matchingStudents) {
+      try {
+        await enrollStudent(courseId, student.studentId || student.regNo, student.name, student.regNo)
+        enrolledCount++
+        console.log(`Enrolled student: ${student.regNo} - ${student.name}`)
+      } catch (error) {
+        console.error('Error enrolling student:', student.regNo, error)
+      }
+    }
+    
+    return res.json({
+      message: `Cleaned and synced advisor data for ${department} ${year}`,
+      advisor: kiruthikaEmail,
+      department,
+      year,
+      clearedEnrollments: clearedCount,
+      matchingStudents: matchingStudents.length,
+      enrolledStudents: enrolledCount,
+      students: matchingStudents.map(s => ({
+        regNo: s.regNo,
+        name: s.name,
+        department: s.department,
+        year: s.year
+      }))
+    })
+  } catch (error) {
+    console.error('Clean advisor data error:', error)
+    return res.status(500).json({ error: error.message })
+  }
+})
+
+// Test endpoint for Kiruthika's student visibility
+app.get('/debug/kiruthika-students', async (req, res) => {
+  try {
+    const kiruthikaEmail = 'kiruthika@demo.com'
+    
+    // Simulate the same logic as /students/list
+    const staff = await getStaffByEmail(kiruthikaEmail)
+    let staffFilter = null
+    
+    if (staff && staff.isClassAdvisor && staff.advisorFor) {
+      staffFilter = staff.advisorFor
+    }
+    
+    const courseId = '21CS701'
+    const enrollmentRecords = await dbGetEnrollmentRecords(courseId)
+    const visibleStudents = []
+    
+    for (const enrollment of enrollmentRecords) {
+      const studentId = enrollment.studentId
+      const studentData = await dbGetStudentByRegNo(enrollment.regNo || studentId)
+      
+      if (staffFilter && studentData) {
+        const studentDepartment = studentData.department || 'M.Tech'
+        const studentYear = studentData.year || '4th Year'
+        
+        if (studentDepartment === staffFilter.department && studentYear === staffFilter.year) {
+          visibleStudents.push({
+            studentId,
+            regNo: enrollment.regNo,
+            name: enrollment.name,
+            department: studentDepartment,
+            year: studentYear
+          })
+        }
+      }
+    }
+    
+    return res.json({
+      staffEmail: kiruthikaEmail,
+      staffFilter,
+      totalEnrollments: enrollmentRecords.length,
+      visibleStudents: visibleStudents.length,
+      students: visibleStudents
+    })
+  } catch (error) {
+    console.error('Kiruthika students test error:', error)
+    return res.status(500).json({ error: error.message })
+  }
+})
 
 // Log all requests
 app.use((req, _res, next) => {
@@ -397,7 +853,19 @@ app.post('/auth/staff/login', async (req, res) => {
     return res.status(401).json({ error: 'invalid_credentials' })
   }
   console.log('[AUTH] Login successful for:', staff.email)
-  return res.json({ id: staff.id, name: staff.name, email: staff.email, role: 'staff' })
+  console.log('[AUTH] Staff details:', { 
+    isClassAdvisor: staff.isClassAdvisor, 
+    advisorFor: staff.advisorFor 
+  })
+  return res.json({ 
+    id: staff.id, 
+    name: staff.name, 
+    email: staff.email, 
+    role: 'staff',
+    department: staff.department,
+    isClassAdvisor: staff.isClassAdvisor || false,
+    advisorFor: staff.advisorFor || null
+  })
 })
 
 // Student auth
@@ -981,12 +1449,44 @@ function getTimeAgo(timestamp) {
   return `${days} day${days > 1 ? 's' : ''} ago`
 }
 
-// Student list with attendance
+// Student list with attendance (STRICT department access control)
 app.get('/students/list', async (req, res) => {
   try {
-    // Get enrollment data which has proper names
-    const courseId = '21CS701'
-    const enrollmentRecords = await dbGetEnrollmentRecords(courseId)
+    // Get staff info from request headers or session for department filtering
+    const staffEmail = req.headers['x-staff-email'] || req.query.staffEmail
+    let allowedDepartments = []
+    let staffInfo = null
+    
+    if (staffEmail) {
+      const staff = await getStaffByEmail(staffEmail)
+      if (staff) {
+        staffInfo = staff
+        
+        // STRICT DEPARTMENT ACCESS CONTROL
+        // If staff is a class advisor, they can see students from their advisor department
+        if (staff.isClassAdvisor && staff.advisorFor) {
+          allowedDepartments.push(staff.advisorFor.department)
+        }
+        
+        // Staff can also see students from their own department (if different from advisor)
+        if (staff.department && !allowedDepartments.includes(staff.department)) {
+          allowedDepartments.push(staff.department)
+        }
+        
+        console.log(`Staff ${staffEmail} allowed departments for student list:`, allowedDepartments)
+      }
+    }
+    
+    // If no allowed departments and staff is authenticated, deny access
+    if (staffEmail && allowedDepartments.length === 0) {
+      return res.status(403).json({ 
+        error: 'no_department_access', 
+        message: 'Staff member has no department assignments' 
+      })
+    }
+    
+    // Get all enrollment data (not just one course)
+    const enrollmentRecords = await getAllEnrollmentRecords()
     const allSessions = await getAllSessions()
     
     const studentsWithAttendance = []
@@ -999,6 +1499,28 @@ app.get('/students/list', async (req, res) => {
       
       // Skip if already processed
       if (studentMap.has(studentId)) continue
+      
+      // Get full student data from database to get department and year info
+      const studentData = await dbGetStudentByRegNo(enrollment.regNo || studentId)
+      
+      // Apply STRICT department filtering if staff is authenticated
+      if (staffEmail && allowedDepartments.length > 0) {
+        if (!studentData) {
+          console.log(`Student ${studentId} filtered out - no student data found`)
+          continue
+        }
+        
+        const studentDepartment = studentData.department || 'Unknown'
+        
+        console.log(`Checking student ${studentId}: dept=${studentDepartment} vs allowed departments=${allowedDepartments.join(', ')}`)
+        
+        // STRICT FILTER: Only show students from allowed departments
+        if (!allowedDepartments.includes(studentDepartment)) {
+          console.log(`Student ${studentId} filtered out - department ${studentDepartment} not in allowed list`)
+          continue
+        }
+        console.log(`Student ${studentId} included - department ${studentDepartment} is allowed`)
+      }
       
       const attendance = await getStudentAttendance(studentId)
       const stats = calculateAttendanceStats(attendance.length, allSessions.length)
@@ -1034,8 +1556,9 @@ app.get('/students/list', async (req, res) => {
         name: enrollment.name || studentId,
         regNo: enrollment.regNo || studentId,
         studentId: studentId,
-        email: enrollment.regNo ? `${enrollment.regNo}@student.edu` : `${studentId}@student.edu`,
-        department: 'Computer Science',
+        email: studentData?.email || (enrollment.regNo ? `${enrollment.regNo}@student.edu` : `${studentId}@student.edu`),
+        department: studentData?.department || 'M.Tech',
+        year: studentData?.year || '4th Year',
         attendance: stats.percentage,
         attendedSessions: stats.attended,
         missedSessions: stats.missed,
@@ -1063,6 +1586,7 @@ app.get('/students/list', async (req, res) => {
     return res.status(500).json({ error: 'internal_error' })
   }
 })
+
 
 // Helper function to determine attendance trend
 function getTrend(weeklyPercentage, monthlyPercentage) {
@@ -1750,12 +2274,41 @@ app.post('/admin/students/add', async (req, res) => {
     console.log('Student created successfully:', createdStudent)
     console.log('Created student name:', `"${createdStudent.name}"`, 'Length:', createdStudent.name?.length)
     
+    // Auto-enroll in default course so student appears in staff panel
+    const courseId = '21CS701'
+    try {
+      console.log('Enrolling student:', { courseId, studentId, name, regNo })
+      await enrollStudent(courseId, studentId, name, regNo)
+      console.log('Student enrolled in course:', courseId)
+      
+      // Verify enrollment
+      const enrollmentRecords = await dbGetEnrollmentRecords(courseId)
+      const studentEnrollment = enrollmentRecords.find(e => e.studentId === studentId)
+      console.log('Enrollment verification:', studentEnrollment ? 'SUCCESS' : 'FAILED')
+    } catch (enrollError) {
+      console.error('Error enrolling student in course:', enrollError)
+    }
+    
+    // Small delay to ensure database writes are complete
+    await new Promise(resolve => setTimeout(resolve, 100))
+    
     // Broadcast student creation to all admin panels
     broadcastAdminUpdate('student-created', {
       student: { regNo, studentId, name, department: studentData.department, year: studentData.year }
     })
     
-    return res.json({ success: true, message: 'Student added successfully' })
+    return res.json({ 
+      success: true, 
+      message: 'Student added successfully',
+      student: {
+        regNo,
+        studentId,
+        name,
+        email: studentData.email,
+        department: studentData.department,
+        year: studentData.year
+      }
+    })
   } catch (error) {
     console.error('Add student error:', error)
     return res.status(500).json({ error: 'internal_error', message: error.message })
@@ -2225,6 +2778,18 @@ app.post('/admin/departments/create', async (req, res) => {
 
 app.get('/admin/departments/summary', async (req, res) => {
   try {
+    const staffEmail = req.headers['x-staff-email'] || req.query.staffEmail
+    let allowedDepartment = null
+    
+    // Check if this is a staff request (not admin) - original simple logic
+    if (staffEmail) {
+      const staff = await getStaffByEmail(staffEmail)
+      if (staff && staff.role !== 'admin') {
+        allowedDepartment = staff.department
+        console.log(`Staff ${staffEmail} requesting departments, restricted to: ${allowedDepartment}`)
+      }
+    }
+    
     const allStudents = await listAllStudents()
     const allStaff = await listStaff()
     
@@ -2274,7 +2839,23 @@ app.get('/admin/departments/summary', async (req, res) => {
       }
     }
     
-    return res.json({ departments: Object.values(departments) })
+    // Filter departments if staff access control is active (original simple logic)
+    let departmentList = Object.values(departments).map(dept => ({
+      name: dept.name,
+      totalStudents: dept.students.total,
+      totalStaff: dept.staff.total,
+      years: Object.keys(dept.students.byYear),
+      yearData: dept.students.byYear,
+      students: dept.students,
+      staff: dept.staff
+    }))
+    
+    if (allowedDepartment) {
+      departmentList = departmentList.filter(dept => dept.name === allowedDepartment)
+      console.log(`Filtered to ${departmentList.length} departments for staff access`)
+    }
+    
+    return res.json({ departments: departmentList })
   } catch (error) {
     console.error('Department summary error:', error)
     console.error('Error stack:', error.stack)
@@ -2282,7 +2863,7 @@ app.get('/admin/departments/summary', async (req, res) => {
   }
 })
 
-// Get students by department and year
+// Get students by department and year (Admin)
 app.get('/admin/students/by-department', async (req, res) => {
   try {
     const { department, year } = req.query
@@ -2317,6 +2898,131 @@ app.get('/admin/students/by-department', async (req, res) => {
     })
   } catch (error) {
     console.error('Get students by department error:', error)
+    return res.status(500).json({ error: 'internal_error' })
+  }
+})
+
+// Get students by department and year (Staff - STRICT department access control)
+app.get('/staff/students/by-department', async (req, res) => {
+  try {
+    const { department, year } = req.query
+    const staffEmail = req.headers['x-staff-email'] || req.query.staffEmail
+    
+    if (!staffEmail) {
+      return res.status(401).json({ error: 'staff_email_required', message: 'Staff authentication required' })
+    }
+    
+    // Get staff info to determine access permissions
+    const staff = await getStaffByEmail(staffEmail)
+    if (!staff) {
+      return res.status(404).json({ error: 'staff_not_found', message: 'Staff member not found' })
+    }
+    
+    console.log(`Staff ${staffEmail} access check:`, { 
+      staffDepartment: staff.department, 
+      isClassAdvisor: staff.isClassAdvisor,
+      advisorFor: staff.advisorFor 
+    })
+    
+    // STRICT DEPARTMENT ACCESS CONTROL
+    // Staff can ONLY see students from their own department
+    let allowedDepartments = []
+    
+    // If staff is a class advisor, they can see students from their advisor department
+    if (staff.isClassAdvisor && staff.advisorFor) {
+      allowedDepartments.push(staff.advisorFor.department)
+    }
+    
+    // Staff can also see students from their own department (if different from advisor)
+    if (staff.department && !allowedDepartments.includes(staff.department)) {
+      allowedDepartments.push(staff.department)
+    }
+    
+    // If no allowed departments, deny access
+    if (allowedDepartments.length === 0) {
+      return res.status(403).json({ 
+        error: 'no_department_access', 
+        message: 'Staff member has no department assignments' 
+      })
+    }
+    
+    console.log(`Staff ${staffEmail} allowed departments:`, allowedDepartments)
+    
+    // If a specific department is requested, verify access
+    if (department && department !== 'All') {
+      if (!allowedDepartments.includes(department)) {
+        console.log(`Access denied: Staff cannot access ${department}. Allowed: ${allowedDepartments.join(', ')}`)
+        return res.status(403).json({ 
+          error: 'department_access_denied', 
+          message: `Access denied. You can only access students from: ${allowedDepartments.join(', ')}`,
+          allowedDepartments
+        })
+      }
+    }
+    
+    // STRICT YEAR ACCESS CONTROL for Class Advisors
+    console.log(`Year access check: isClassAdvisor=${staff.isClassAdvisor}, advisorFor=${JSON.stringify(staff.advisorFor)}, requestedYear="${year}"`)
+    if (staff.isClassAdvisor && staff.advisorFor && year && year !== 'All') {
+      console.log(`Comparing advisor year "${staff.advisorFor.year}" with requested year "${year}"`)
+      if (staff.advisorFor.year !== year) {
+        console.log(`Year access denied: Staff ${staffEmail} (advisor for ${staff.advisorFor.year}) cannot access ${year}`)
+        return res.status(403).json({ 
+          error: 'year_access_denied', 
+          message: `Access denied. You can only access students from ${staff.advisorFor.year}. Requested: ${year}`,
+          allowedYear: staff.advisorFor.year
+        })
+      }
+      console.log(`Year access granted: Staff can access ${year}`)
+    }
+    
+    const allStudents = await listAllStudents()
+    let filtered = allStudents
+    
+    // Filter out placeholders
+    filtered = filtered.filter(s => !s.isYearPlaceholder && !s.isDepartmentPlaceholder && !s.isPlaceholder)
+    
+    // ENFORCE STRICT DEPARTMENT FILTERING
+    // Only show students from allowed departments
+    filtered = filtered.filter(s => {
+      const studentDept = s.department || 'Unknown'
+      return allowedDepartments.includes(studentDept)
+    })
+    
+    // Apply additional filters if requested
+    if (department && department !== 'All') {
+      filtered = filtered.filter(s => (s.department || 'Unknown') === department)
+    }
+    if (year && year !== 'All') {
+      filtered = filtered.filter(s => (s.year || 'Unknown') === year)
+    }
+    
+    // Sort by student ID in ascending order
+    filtered.sort((a, b) => {
+      const idA = a.studentId || a.regNo
+      const idB = b.studentId || b.regNo
+      return idA.localeCompare(idB, undefined, { numeric: true })
+    })
+    
+    console.log(`Staff ${staffEmail}: Found ${filtered.length} students (filtered by departments: ${allowedDepartments.join(', ')})`)
+    
+    return res.json({ 
+      students: filtered.map(s => ({
+        ...s,
+        department: s.department || 'Unknown',
+        year: s.year || 'Unknown'
+      })),
+      count: filtered.length,
+      allowedDepartments,
+      staffInfo: {
+        email: staff.email,
+        name: staff.name,
+        department: staff.department,
+        isClassAdvisor: staff.isClassAdvisor,
+        advisorFor: staff.advisorFor
+      }
+    })
+  } catch (error) {
+    console.error('Get students by department error (staff):', error)
     return res.status(500).json({ error: 'internal_error' })
   }
 })
@@ -2418,6 +3124,261 @@ function calculateDuration(startDate, endDate) {
   if (diffDays === 1) return '1 day'
   return `${diffDays} days`
 }
+
+// Face Recognition Integration Endpoints
+const FACE_SERVICE_URL = process.env.FACE_SERVICE_URL || 'http://localhost:5001'
+
+// Start face recognition session
+app.post('/face-recognition/session/start', async (req, res) => {
+  try {
+    const { sessionId, courseId, department, year } = req.body
+    
+    if (!sessionId || !courseId || !department || !year) {
+      return res.status(400).json({ 
+        error: 'missing_fields', 
+        message: 'sessionId, courseId, department, and year are required' 
+      })
+    }
+    
+    // Check if session exists
+    const session = sessions.get(sessionId)
+    if (!session) {
+      return res.status(404).json({ error: 'session_not_found' })
+    }
+    
+    // Call face recognition service to start session
+    const response = await fetch(`${FACE_SERVICE_URL}/session/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId, courseId, department, year })
+    })
+    
+    if (!response.ok) {
+      const error = await response.json()
+      return res.status(response.status).json(error)
+    }
+    
+    const result = await response.json()
+    
+    // Broadcast to admin panel that face recognition is active
+    broadcastAdminUpdate('face_recognition_started', {
+      sessionId,
+      courseId,
+      department,
+      year,
+      timestamp: Date.now()
+    })
+    
+    return res.json({
+      success: true,
+      message: 'Face recognition session started',
+      sessionId,
+      faceServiceStatus: result
+    })
+    
+  } catch (error) {
+    console.error('Face recognition session start error:', error)
+    return res.status(500).json({ 
+      error: 'internal_error',
+      message: 'Failed to start face recognition session'
+    })
+  }
+})
+
+// Handle face recognition attendance
+app.post('/attendance/face-recognition', async (req, res) => {
+  try {
+    const { sessionId, studentId, confidence, source, department, year, timestamp } = req.body
+    
+    if (!sessionId || !studentId) {
+      return res.status(400).json({ error: 'missing_required_fields' })
+    }
+    
+    // Verify session exists and is active
+    const session = sessions.get(sessionId)
+    if (!session) {
+      return res.status(404).json({ error: 'session_not_found' })
+    }
+    
+    if (session.status !== 'active') {
+      return res.status(400).json({ error: 'session_not_active' })
+    }
+    
+    // Check if student is enrolled
+    const enrolled = await dbIsEnrolled(session.courseId, studentId)
+    if (!enrolled) {
+      return res.status(403).json({ error: 'student_not_enrolled' })
+    }
+    
+    // Check hierarchical access (same as QR scan)
+    const student = await dbGetStudentByRegNo(studentId)
+    if (student) {
+      const studentDept = student.department || 'Computer Science'
+      const studentYear = student.year || '4th Year'
+      
+      if (studentDept !== department || studentYear !== year) {
+        console.log(`Face recognition access denied: Student ${studentId} (${studentDept} ${studentYear}) tried to access ${department} ${year} session`)
+        return res.status(403).json({ 
+          error: 'access_denied',
+          message: `Access denied. This session is for ${department} ${year} students only.`,
+          studentDepartment: studentDept,
+          studentYear: studentYear,
+          sessionDepartment: department,
+          sessionYear: year
+        })
+      }
+    }
+    
+    // Check if already marked present
+    if (session.present.has(studentId)) {
+      return res.status(409).json({ 
+        error: 'already_present',
+        message: 'Student already marked present in this session'
+      })
+    }
+    
+    // Mark present
+    session.present.add(studentId)
+    
+    // Save to database
+    try {
+      await dbMarkPresent(sessionId, studentId)
+    } catch (dbError) {
+      console.error('Database error marking present:', dbError)
+    }
+    
+    const markedAt = new Date().toISOString()
+    
+    // Broadcast attendance update
+    io.to(`session:${sessionId}`).emit('face_recognition_attendance', {
+      sessionId,
+      studentId,
+      confidence,
+      markedAt,
+      countPresent: session.present.size,
+      countRemaining: Math.max(0, session.enrolled.size - session.present.size)
+    })
+    
+    // Broadcast to admin panel
+    broadcastAdminUpdate('face_attendance_marked', {
+      sessionId,
+      studentId,
+      confidence,
+      source: 'face_recognition',
+      markedAt,
+      timestamp: Date.now()
+    })
+    
+    console.log(`Face recognition attendance: Student ${studentId} marked present in session ${sessionId} (confidence: ${confidence})`)
+    
+    return res.json({
+      success: true,
+      status: 'present',
+      sessionId,
+      studentId,
+      markedAt,
+      confidence,
+      source: 'face_recognition',
+      message: 'Attendance marked successfully via face recognition'
+    })
+    
+  } catch (error) {
+    console.error('Face recognition attendance error:', error)
+    return res.status(500).json({ 
+      error: 'internal_error',
+      message: 'Failed to mark attendance via face recognition'
+    })
+  }
+})
+
+// Get face recognition service status
+app.get('/face-recognition/status', async (req, res) => {
+  try {
+    const response = await fetch(`${FACE_SERVICE_URL}/health`)
+    
+    if (!response.ok) {
+      return res.status(503).json({ 
+        error: 'service_unavailable',
+        message: 'Face recognition service is not available'
+      })
+    }
+    
+    const serviceStatus = await response.json()
+    
+    return res.json({
+      success: true,
+      service_available: true,
+      service_status: serviceStatus,
+      service_url: FACE_SERVICE_URL
+    })
+    
+  } catch (error) {
+    console.error('Face recognition service status error:', error)
+    return res.status(503).json({ 
+      error: 'service_unavailable',
+      message: 'Cannot connect to face recognition service',
+      service_url: FACE_SERVICE_URL
+    })
+  }
+})
+
+// Proxy face recognition enrollment requests
+app.post('/face-recognition/enroll', async (req, res) => {
+  try {
+    const response = await fetch(`${FACE_SERVICE_URL}/enroll`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body)
+    })
+    
+    const result = await response.json()
+    
+    if (!response.ok) {
+      return res.status(response.status).json(result)
+    }
+    
+    // Broadcast enrollment update to admin
+    broadcastAdminUpdate('face_recognition_enrollment', {
+      studentId: req.body.student_id,
+      name: req.body.name,
+      imagesProcessed: result.images_processed,
+      timestamp: Date.now()
+    })
+    
+    return res.json(result)
+    
+  } catch (error) {
+    console.error('Face recognition enrollment proxy error:', error)
+    return res.status(500).json({ 
+      error: 'internal_error',
+      message: 'Failed to process face recognition enrollment'
+    })
+  }
+})
+
+// Get enrolled students for face recognition
+app.get('/face-recognition/students', async (req, res) => {
+  try {
+    const response = await fetch(`${FACE_SERVICE_URL}/students`)
+    
+    if (!response.ok) {
+      return res.status(response.status).json({ 
+        error: 'service_error',
+        message: 'Failed to get enrolled students from face recognition service'
+      })
+    }
+    
+    const result = await response.json()
+    return res.json(result)
+    
+  } catch (error) {
+    console.error('Face recognition students proxy error:', error)
+    return res.status(500).json({ 
+      error: 'internal_error',
+      message: 'Failed to get face recognition students'
+    })
+  }
+})
 
 
 // Serve frontend build (same-origin) if available

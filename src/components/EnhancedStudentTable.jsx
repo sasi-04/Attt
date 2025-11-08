@@ -43,7 +43,14 @@ export default function EnhancedStudentTable(){
   const loadStudents = async () => {
     try {
       setLoading(true)
-      const response = await apiGet('/students/list')
+      
+      // Get staff email for department filtering
+      const user = JSON.parse(localStorage.getItem('user') || '{}')
+      const staffEmail = user.email
+      
+      // Fetch students with staff email for filtering
+      const url = staffEmail ? `/students/list?staffEmail=${encodeURIComponent(staffEmail)}` : '/students/list'
+      const response = await apiGet(url)
       const students = response.students.map(s => ({
         name: s.name,
         roll: s.regNo,

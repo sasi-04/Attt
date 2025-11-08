@@ -1,5 +1,8 @@
 import React, { useMemo, useState, useEffect } from 'react'
 import { apiGet } from './api.js'
+import FaceEnrollmentModal from './FaceEnrollmentModal.jsx'
+import AddStudentModal from './AddStudentModal.jsx'
+import { getSocket } from './ws.js'
 
 export default function StudentTable(){
   const [query, setQuery] = useState('')
@@ -10,32 +13,74 @@ export default function StudentTable(){
   const [loading, setLoading] = useState(true)
   const [selectedStudent, setSelectedStudent] = useState(null)
   const [showModal, setShowModal] = useState(false)
+  const [showFaceEnrollment, setShowFaceEnrollment] = useState(false)
+  const [enrollmentStudent, setEnrollmentStudent] = useState(null)
+  const [enrolledStudents, setEnrolledStudents] = useState([])
+  const [showAddStudent, setShowAddStudent] = useState(false)
+  const [staffInfo, setStaffInfo] = useState(null)
+
+  const fetchStudentData = async () => {
+    try {
+      // Get staff info from localStorage or context
+      const user = JSON.parse(localStorage.getItem('user') || '{}')
+      const staffEmail = user.email
+      
+      // Fetch students with staff email for filtering
+      const url = staffEmail ? `/students/list?staffEmail=${encodeURIComponent(staffEmail)}` : '/students/list'
+      const response = await apiGet(url)
+      const students = response.students.map(s => ({
+        name: s.name,
+        roll: s.regNo,
+        dept: s.department,
+        contact: s.email,
+        attendance: s.attendance,
+        lastSeen: s.lastSeen,
+        studentId: s.studentId,
+        attendedSessions: s.attendedSessions,
+        missedSessions: s.missedSessions,
+        totalSessions: s.totalSessions,
+        status: s.status
+      }))
+      setData(students)
+
+      // Fetch enrolled students for face recognition
+      try {
+        const faceResponse = await apiGet('/face-recognition/students')
+        setEnrolledStudents(faceResponse.students || [])
+      } catch (faceError) {
+        console.error('Face recognition service not available:', faceError)
+        setEnrolledStudents([])
+      }
+    } catch (error) {
+      console.error('Error fetching students:', error)
+    } finally {
+      setLoading(false)
+    }
+  }
 
   useEffect(() => {
-    const fetchStudents = async () => {
-      try {
-        const response = await apiGet('/students/list')
-        const students = response.students.map(s => ({
-          name: s.name,
-          roll: s.regNo,
-          dept: s.department,
-          contact: s.email,
-          attendance: s.attendance,
-          lastSeen: s.lastSeen,
-          studentId: s.studentId,
-          attendedSessions: s.attendedSessions,
-          missedSessions: s.missedSessions,
-          totalSessions: s.totalSessions,
-          status: s.status
-        }))
-        setData(students)
-      } catch (error) {
-        console.error('Failed to fetch students:', error)
-      } finally {
-        setLoading(false)
+    fetchStudentData()
+    
+    // Get staff info
+    const user = JSON.parse(localStorage.getItem('user') || '{}')
+    setStaffInfo(user)
+    
+    // Set up WebSocket listeners for real-time updates
+    const socket = getSocket()
+    
+    const handleAdminUpdate = (update) => {
+      if (update.type === 'student-created' || update.type === 'student-deleted' || update.type === 'student-updated') {
+        setLoading(true)
+        fetchStudentData()
       }
     }
-    fetchStudents()
+    
+    socket.on('admin-update', handleAdminUpdate)
+    
+    // Cleanup on unmount
+    return () => {
+      socket.off('admin-update', handleAdminUpdate)
+    }
   }, [])
 
   const handleViewProfile = (student) => {
@@ -46,6 +91,48 @@ export default function StudentTable(){
   const closeModal = () => {
     setShowModal(false)
     setSelectedStudent(null)
+  }
+
+  const handleFaceEnrollment = (student) => {
+    setEnrollmentStudent(student)
+    setShowFaceEnrollment(true)
+  }
+
+  const closeFaceEnrollment = () => {
+    setShowFaceEnrollment(false)
+    setEnrollmentStudent(null)
+  }
+
+  const handleEnrollmentComplete = async (result) => {
+    console.log('Enrollment completed:', result)
+    // Refresh enrolled students list automatically
+    try {
+      const enrolledResponse = await apiGet('/face-recognition/students')
+      setEnrolledStudents(enrolledResponse.students || [])
+    } catch (error) {
+      console.error('Failed to refresh enrolled students:', error)
+    }
+  }
+
+  // Check if student is enrolled in face recognition
+  const isStudentEnrolled = (studentId, rollNo) => {
+    return enrolledStudents.some(enrolled => 
+      enrolled.student_id === studentId || enrolled.student_id === rollNo
+    )
+  }
+
+  const handleAddStudent = () => {
+    setShowAddStudent(true)
+  }
+
+  const closeAddStudent = () => {
+    setShowAddStudent(false)
+  }
+
+  const handleStudentAdded = (newStudent) => {
+    // Refresh the student list immediately
+    setLoading(true)
+    fetchStudentData()
   }
 
   const filtered = useMemo(()=>{
@@ -68,7 +155,28 @@ export default function StudentTable(){
   return (
     <div className="bg-white rounded-xl shadow-sm p-5">
       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-4">
-        <div className="font-semibold text-lg">Students</div>
+        <div className="flex items-center gap-4">
+          <div className="font-semibold text-lg">Students</div>
+          {loading && (
+            <div className="flex items-center gap-2 text-sm text-blue-600">
+              <div className="animate-spin w-4 h-4 border-2 border-blue-600 border-t-transparent rounded-full"></div>
+              <span>Updating...</span>
+            </div>
+          )}
+          {staffInfo?.isClassAdvisor && staffInfo?.advisorFor && (
+            <button
+              onClick={handleAddStudent}
+              className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-medium transition-colors"
+            >
+              ➕ Add Student
+            </button>
+          )}
+          {staffInfo?.isClassAdvisor && staffInfo?.advisorFor && (
+            <div className="text-sm text-gray-600">
+              Managing: {staffInfo.advisorFor.department} - {staffInfo.advisorFor.year}
+            </div>
+          )}
+        </div>
         <div className="flex gap-2 items-center">
           <input value={query} onChange={(e)=>setQuery(e.target.value)} placeholder="Search name/email/roll" className="px-3 py-2 rounded-md border border-gray-200 bg-gray-50 w-64" />
           <select value={dept} onChange={(e)=>setDept(e.target.value)} className="px-3 py-2 rounded-md border border-gray-200 bg-gray-50">
@@ -90,10 +198,10 @@ export default function StudentTable(){
             <tr>
               <th className="py-2 pr-4">Name</th>
               <th className="py-2 pr-4">Roll Number</th>
-              <th className="py-2 pr-4">Department</th>
               <th className="py-2 pr-4">Contact</th>
               <th className="py-2 pr-4">Attendance %</th>
               <th className="py-2 pr-4">Last Seen</th>
+              <th className="py-2 pr-4">Face Recognition</th>
               <th className="py-2 pr-4">Actions</th>
             </tr>
           </thead>
@@ -103,7 +211,6 @@ export default function StudentTable(){
                 <tr key={s.roll}>
                   <td className="py-2 pr-4">{s.name}</td>
                   <td className="py-2 pr-4">{s.roll}</td>
-                  <td className="py-2 pr-4">{s.dept}</td>
                   <td className="py-2 pr-4">{s.contact}</td>
                   <td className="py-2 pr-4">
                     <span className={`inline-block px-2 py-1 rounded text-xs ${
@@ -116,6 +223,20 @@ export default function StudentTable(){
                     </span>
                   </td>
                   <td className="py-2 pr-4 text-gray-600">{s.lastSeen}</td>
+                  <td className="py-2 pr-4">
+                    {isStudentEnrolled(s.studentId, s.roll) ? (
+                      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                        ✅ Face Recognized
+                      </span>
+                    ) : (
+                      <button
+                        onClick={() => handleFaceEnrollment(s)}
+                        className="px-3 py-1 rounded-md bg-purple-600 text-white text-xs hover:bg-purple-700 transition-colors"
+                      >
+                        👤 Add Face
+                      </button>
+                    )}
+                  </td>
                   <td className="py-2 pr-4">
                     <button 
                       onClick={() => handleViewProfile(s)}
@@ -212,6 +333,23 @@ export default function StudentTable(){
             </div>
           </div>
         </div>
+      )}
+
+      {/* Face Enrollment Modal */}
+      {showFaceEnrollment && enrollmentStudent && (
+        <FaceEnrollmentModal
+          student={enrollmentStudent}
+          onClose={closeFaceEnrollment}
+          onEnrollmentComplete={handleEnrollmentComplete}
+        />
+      )}
+
+      {/* Add Student Modal */}
+      {showAddStudent && (
+        <AddStudentModal
+          onClose={closeAddStudent}
+          onStudentAdded={handleStudentAdded}
+        />
       )}
     </div>
   )

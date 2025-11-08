@@ -48,7 +48,7 @@ export async function apiPut(path, body) {
   }
 }
 
-// Staff API functions
+// Staff API functions (merged - no duplicates)
 export const staffApi = {
   // Get staff profile
   getProfile: (staffId) => apiGet(`/staff/${staffId}/profile`),
@@ -64,7 +64,40 @@ export const staffApi = {
   getAnalytics: (staffId) => apiGet(`/staff/${staffId}/analytics`),
   
   // Get staff recent activity
-  getRecentActivity: (staffId) => apiGet(`/staff/${staffId}/recent-activity`)
+  getRecentActivity: (staffId) => apiGet(`/staff/${staffId}/recent-activity`),
+
+  // Department access control functions
+  getStudentsByDepartment: (department, year) => {
+    const user = JSON.parse(localStorage.getItem('ams_user') || '{}')
+    const staffEmail = user.email
+    
+    const params = new URLSearchParams()
+    if (department) params.append('department', department)
+    if (year) params.append('year', year)
+    if (staffEmail) params.append('staffEmail', staffEmail)
+    
+    return fetch(`/staff/students/by-department?${params.toString()}`).then(r => r.json())
+  },
+  
+  getDepartmentsSummary: () => {
+    const user = JSON.parse(localStorage.getItem('ams_user') || '{}')
+    const staffEmail = user.email
+    
+    const params = new URLSearchParams()
+    if (staffEmail) params.append('staffEmail', staffEmail)
+    
+    return fetch(`/admin/departments/summary?${params.toString()}`)
+      .then(r => {
+        if (!r.ok) {
+          throw new Error(`HTTP ${r.status}: ${r.statusText}`)
+        }
+        return r.json()
+      })
+      .catch(error => {
+        console.error('Error loading departments:', error)
+        throw error
+      })
+  }
 }
 
 // Admin API functions
@@ -175,5 +208,3 @@ export const adminApi = {
     }).then(r => r.json())
   }
 }
-
-

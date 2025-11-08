@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { adminApi } from './api.js'
+import { adminApi, staffApi } from './api.js'
 import { useDepartmentUpdates, useStaffUpdates } from '../hooks/useWebSocket.js'
 
 export default function HierarchicalStaffView() {
@@ -8,22 +8,16 @@ export default function HierarchicalStaffView() {
   const [departments, setDepartments] = useState([])
   const [staff, setStaff] = useState([])
   const [loading, setLoading] = useState(true)
-  const [message, setMessage] = useState('')
-  
-  // Modals
+  const [selectedStaff, setSelectedStaff] = useState(null)
   const [showAddModal, setShowAddModal] = useState(false)
   const [showEditModal, setShowEditModal] = useState(false)
   const [showDeleteModal, setShowDeleteModal] = useState(false)
   const [showPasswordModal, setShowPasswordModal] = useState(false)
-  const [selectedStaff, setSelectedStaff] = useState(null)
-  
-  // Department Management Modals
   const [showAddDeptModal, setShowAddDeptModal] = useState(false)
   const [showBulkDeleteModal, setShowBulkDeleteModal] = useState(false)
   const [selectedDepartments, setSelectedDepartments] = useState([])
+  const [message, setMessage] = useState('')
   const [newDeptName, setNewDeptName] = useState('')
-  
-  // Form data
   const [formData, setFormData] = useState({
     name: '',
     email: '',
@@ -86,7 +80,7 @@ export default function HierarchicalStaffView() {
   const loadDepartments = async () => {
     try {
       setLoading(true)
-      const response = await adminApi.getDepartmentsSummary()
+      const response = await staffApi.getDepartmentsSummary()
       setDepartments(response.departments)
     } catch (error) {
       console.error('Failed to load departments:', error)
@@ -115,8 +109,8 @@ export default function HierarchicalStaffView() {
     try {
       setLoadingYears(true)
       console.log('Loading available years for department:', department)
-      // Get students to find available years in this department
-      const response = await adminApi.getStudentsByDepartment(department, null)
+      // Get students to find available years in this department (with staff access control)
+      const response = await staffApi.getStudentsByDepartment(department, null)
       console.log('Students response:', response)
       
       if (response && response.students && Array.isArray(response.students)) {
@@ -162,6 +156,28 @@ export default function HierarchicalStaffView() {
     setStaff([])
   }
 
+  const testDirectAPI = async () => {
+    console.log('=== TESTING DIRECT API CALL ===')
+    try {
+      const testData = {
+        name: 'Direct Test Staff',
+        email: 'directtest@example.com',
+        password: 'test123',
+        department: selectedDept?.name || 'M.Tech',
+        designation: 'Assistant Professor',
+        contact: '1234567890'
+      }
+      console.log('Testing with data:', testData)
+      const response = await adminApi.addStaff(testData)
+      console.log('Direct API response:', response)
+      setMessage('Direct API test successful!')
+      await loadStaff(selectedDept.name)
+    } catch (error) {
+      console.error('Direct API test failed:', error)
+      setMessage('Direct API test failed: ' + error.message)
+    }
+  }
+
   const openAddModal = () => {
     // Force clear all form data
     const cleanFormData = {
@@ -186,10 +202,18 @@ export default function HierarchicalStaffView() {
     setFormData({
       name: staffMember.name,
       email: staffMember.email,
-      department: staffMember.department,
+      department: staffMember.department || 'M.Tech',
       designation: staffMember.designation,
-      contact: staffMember.contact || ''
+      contact: staffMember.contact || '',
+      isClassAdvisor: staffMember.isClassAdvisor || false,
+      advisorYear: staffMember.advisorFor?.year || ''
     })
+    
+    // Load available years if staff is currently a class advisor
+    if (staffMember.isClassAdvisor && staffMember.department) {
+      loadAvailableYears(staffMember.department)
+    }
+    
     setShowEditModal(true)
     setMessage('')
   }
@@ -209,14 +233,38 @@ export default function HierarchicalStaffView() {
 
   const handleAddStaff = async (e) => {
     e.preventDefault()
+    console.log('=== ADD STAFF FORM SUBMISSION ===')
+    console.log('Form data:', formData)
+    console.log('Selected department:', selectedDept)
+    
+    // Validate required fields
+    if (!formData.name || !formData.email || !formData.password) {
+      console.error('Missing required fields:', {
+        name: !formData.name,
+        email: !formData.email,
+        password: !formData.password
+      })
+      setMessage('Please fill in all required fields (Name, Email, Password)')
+      return
+    }
+    
+    if (!selectedDept || !selectedDept.name) {
+      console.error('No department selected')
+      setMessage('No department selected. Please go back and select a department.')
+      return
+    }
+    
     try {
       const staffData = {
         ...formData,
         department: selectedDept.name
       }
       
+      console.log('Sending staff data to API:', staffData)
+      
       // Add staff first
       const addResponse = await adminApi.addStaff(staffData)
+      console.log('API response:', addResponse)
       
       // If this staff is assigned as class advisor, assign them to hierarchy
       if (formData.isClassAdvisor && formData.advisorYear) {
@@ -276,18 +324,67 @@ export default function HierarchicalStaffView() {
       // Also refresh departments to update counts
       await loadDepartments()
     } catch (error) {
-      setMessage('Failed to add staff')
+      console.error('Add staff error:', error)
+      console.error('Error details:', {
+        message: error.message,
+        code: error.code,
+        status: error.status,
+        raw: error.raw
+      })
+      
+      let errorMessage = 'Failed to add staff'
+      if (error.code === 'email_already_exists') {
+        errorMessage = 'Email already exists. Please use a different email.'
+      } else if (error.code === 'network_error') {
+        errorMessage = 'Network error. Please check your connection.'
+      } else if (error.message) {
+        errorMessage = `Failed to add staff: ${error.message}`
+      }
+      
+      setMessage(errorMessage)
     }
   }
 
   const handleEditStaff = async (e) => {
     e.preventDefault()
     try {
+      // Update staff basic information
       await adminApi.updateStaff(selectedStaff.id, formData)
-      setMessage('Staff updated successfully!')
+      
+      // If this staff is assigned as class advisor, assign them to hierarchy
+      if (formData.isClassAdvisor && formData.advisorYear) {
+        try {
+          console.log('Assigning class advisor to hierarchy:', {
+            staffId: formData.email,
+            department: formData.department,
+            year: formData.advisorYear,
+            isClassAdvisor: true
+          })
+          
+          const hierarchyResponse = await fetch('/admin/hierarchy/assign-staff', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              staffId: formData.email,
+              department: formData.department,
+              year: formData.advisorYear,
+              isClassAdvisor: true
+            })
+          })
+          
+          if (!hierarchyResponse.ok) {
+            console.error('Failed to assign hierarchy')
+          }
+        } catch (hierarchyError) {
+          console.error('Hierarchy assignment error:', hierarchyError)
+        }
+      }
+      
+      setMessage(`Staff updated successfully!${formData.isClassAdvisor ? ' Assigned as class advisor for ' + formData.advisorYear : ''}`)
       setShowEditModal(false)
       loadStaff(selectedDept.name)
     } catch (error) {
+      console.error('Edit staff error:', error)
       setMessage('Failed to update staff')
     }
   }
@@ -418,6 +515,7 @@ export default function HierarchicalStaffView() {
       </div>
     )
   }
+
 
   // LEVEL 1: DEPARTMENTS VIEW
   if (viewLevel === 'departments') {
@@ -593,6 +691,12 @@ export default function HierarchicalStaffView() {
               ← Back to Departments
             </button>
             <button
+              onClick={testDirectAPI}
+              className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 mr-2"
+            >
+              🧪 Test API
+            </button>
+            <button
               onClick={openAddModal}
               className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
             >
@@ -672,19 +776,22 @@ export default function HierarchicalStaffView() {
         <div 
           className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" 
           onClick={(e) => {
-            e.preventDefault()
-            setShowAddModal(false)
+            if (e.target === e.currentTarget) {
+              setShowAddModal(false)
+            }
           }}
         >
           <div 
             className="bg-white rounded-xl shadow-2xl p-6 max-w-md w-full mx-4" 
             onClick={(e) => {
               e.stopPropagation()
-              e.preventDefault()
             }}
           >
             <h2 className="text-xl font-bold mb-4">Add New Staff</h2>
-            <form key="add-staff-form" onSubmit={handleAddStaff} className="space-y-3">
+            <form key="add-staff-form" onSubmit={(e) => {
+              console.log('FORM SUBMIT TRIGGERED')
+              handleAddStaff(e)
+            }} className="space-y-3">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Full Name *</label>
                 <input type="text" placeholder="Enter full name" value={formData.name} onChange={(e) => setFormData({...formData, name: e.target.value})} className="w-full px-3 py-2 border rounded-lg" required />
@@ -806,7 +913,16 @@ export default function HierarchicalStaffView() {
               
               <div className="flex gap-2 justify-end">
                 <button type="button" onClick={() => setShowAddModal(false)} className="px-4 py-2 bg-gray-200 rounded-lg">Cancel</button>
-                <button type="submit" className="px-4 py-2 bg-blue-600 text-white rounded-lg">Add Staff</button>
+                <button 
+                  type="submit" 
+                  onClick={(e) => {
+                    console.log('SUBMIT BUTTON CLICKED')
+                    console.log('Form data at click:', formData)
+                  }}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg"
+                >
+                  Add Staff
+                </button>
               </div>
             </form>
           </div>
@@ -826,6 +942,63 @@ export default function HierarchicalStaffView() {
                 <option>Associate Professor</option>
                 <option>Professor</option>
               </select>
+              
+              {/* Department Selection */}
+              <select 
+                value={formData.department} 
+                onChange={(e) => setFormData({...formData, department: e.target.value})} 
+                className="w-full px-3 py-2 border rounded-lg"
+              >
+                <option value="M.Tech">M.Tech</option>
+                <option value="CSE">CSE</option>
+                <option value="ECE">ECE</option>
+                <option value="MECH">MECH</option>
+                <option value="CIVIL">CIVIL</option>
+              </select>
+              
+              {/* Class Advisor Assignment */}
+              <div className="border-t pt-3">
+                <div className="flex items-center mb-2">
+                  <input 
+                    type="checkbox" 
+                    id="editIsClassAdvisor" 
+                    checked={formData.isClassAdvisor}
+                    onChange={(e) => {
+                      setFormData({...formData, isClassAdvisor: e.target.checked})
+                      if (e.target.checked && formData.department) {
+                        loadAvailableYears(formData.department)
+                      }
+                    }}
+                    className="mr-2 h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+                  />
+                  <label htmlFor="editIsClassAdvisor" className="text-sm font-medium text-blue-800">
+                    👨‍🏫 Assign as Class Advisor
+                  </label>
+                </div>
+                
+                {formData.isClassAdvisor && (
+                  <div>
+                    <label className="block text-sm font-medium text-blue-700 mb-1">Select Year:</label>
+                    {loadingYears ? (
+                      <div className="text-sm text-gray-500">Loading years...</div>
+                    ) : (
+                      <select 
+                        value={formData.advisorYear} 
+                        onChange={(e) => setFormData({...formData, advisorYear: e.target.value})}
+                        className="w-full px-3 py-2 border border-blue-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                        required={formData.isClassAdvisor}
+                        disabled={loadingYears}
+                      >
+                        <option value="">Select Year</option>
+                        {availableYears.map(year => (
+                          <option key={year} value={year}>{year}</option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+                )}
+              </div>
+              
               <div className="flex gap-2 justify-end">
                 <button type="button" onClick={() => setShowEditModal(false)} className="px-4 py-2 bg-gray-200 rounded-lg">Cancel</button>
                 <button type="submit" className="px-4 py-2 bg-blue-600 text-white rounded-lg">Update</button>
