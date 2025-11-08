@@ -135,7 +135,9 @@ export async function getStaffById(id){
 }
 
 export async function updateStaff(id, updates){
-  return staffDb.update({ id }, { $set: updates })
+  // Ensure nested objects like advisorFor are properly set
+  const result = await staffDb.update({ id }, { $set: updates }, { returnUpdatedDocs: true })
+  return result
 }
 
 export async function deleteStaff(id){

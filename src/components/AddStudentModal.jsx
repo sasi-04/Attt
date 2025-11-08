@@ -15,10 +15,41 @@ export default function AddStudentModal({ onClose, onStudentAdded }) {
   const [createdStudent, setCreatedStudent] = useState(null)
   const [staffInfo, setStaffInfo] = useState(null)
 
-  // Get staff info on component mount
+  // Reset form function
+  const resetForm = () => {
+    setFormData({
+      name: '',
+      regNo: '',
+      studentId: '',
+      email: '',
+      password: ''
+    })
+    setError('')
+    // Don't reset credentials immediately - let user see them first
+    // setShowCredentials(false)
+    // setCreatedStudent(null)
+    setIsSubmitting(false)
+  }
+  
+  const handleCloseModal = () => {
+    // If we just showed credentials, call the callback to refresh the list
+    if (showCredentials && createdStudent && onStudentAdded) {
+      console.log('Calling onStudentAdded callback after credentials shown')
+      onStudentAdded(createdStudent)
+    }
+    
+    // Reset everything when actually closing
+    setShowCredentials(false)
+    setCreatedStudent(null)
+    resetForm()
+    onClose()
+  }
+
+  // Get staff info on component mount and reset form
   useEffect(() => {
-    const user = JSON.parse(localStorage.getItem('user') || '{}')
+    const user = JSON.parse(localStorage.getItem('ams_user') || localStorage.getItem('user') || '{}')
     setStaffInfo(user)
+    resetForm()
   }, [])
 
   const handleInputChange = (e) => {
@@ -81,27 +112,58 @@ export default function AddStudentModal({ onClose, onStudentAdded }) {
       }
 
       // Add department and year from staff advisor assignment if available
-      if (staffInfo?.isClassAdvisor && staffInfo?.advisorFor) {
-        studentData.department = staffInfo.advisorFor.department
-        studentData.year = staffInfo.advisorFor.year
+      // Also check localStorage directly in case staffInfo wasn't loaded
+      const currentUser = JSON.parse(localStorage.getItem('ams_user') || localStorage.getItem('user') || '{}')
+      const advisorInfo = staffInfo?.advisorFor || currentUser?.advisorFor
+      
+      if ((staffInfo?.isClassAdvisor || currentUser?.isClassAdvisor) && advisorInfo) {
+        studentData.department = advisorInfo.department
+        studentData.year = advisorInfo.year
+        console.log('Using advisor info for student:', { department: studentData.department, year: studentData.year })
+      } else {
+        console.warn('No advisor info found - student may not appear in staff panel!')
+        console.log('staffInfo:', staffInfo)
+        console.log('currentUser:', currentUser)
       }
 
+      console.log('Submitting student data:', studentData)
       const response = await apiPost('/admin/students/add', studentData)
+      console.log('API response:', response)
       
-      if (response.success) {
+      if (response.success || response.student) {
         // Store created student data and show credentials
-        setCreatedStudent({
-          ...studentData,
-          loginId: studentData.regNo,
-          password: studentData.password
-        })
-        setShowCredentials(true)
-        
-        if (onStudentAdded) {
-          onStudentAdded(response.student)
+        // IMPORTANT: Password is not returned by API for security, so use form data
+        const createdData = response.student || studentData
+        const credentialData = {
+          name: createdData.name || studentData.name,
+          regNo: createdData.regNo || studentData.regNo,
+          loginId: createdData.regNo || studentData.regNo, // Login ID is the regNo
+          email: createdData.email || studentData.email,
+          password: studentData.password, // Use password from form (not in API response)
+          department: createdData.department || studentData.department,
+          year: createdData.year || studentData.year
         }
+        
+        console.log('Setting credential data:', { ...credentialData, password: '***' })
+        console.log('About to show credentials modal...')
+        setCreatedStudent(credentialData)
+        setShowCredentials(true)
+        console.log('Credentials state set - modal should now be visible')
+        console.log('Credential data:', {
+          name: credentialData.name,
+          loginId: credentialData.loginId,
+          email: credentialData.email,
+          password: credentialData.password ? '***' : 'MISSING',
+          hasPassword: !!credentialData.password
+        })
+        
+        // DON'T call onStudentAdded here - it closes the modal immediately!
+        // We'll call it when the user clicks "Done" on the credentials view
+        // This allows the credentials to be displayed first
       } else {
-        setError(response.error || 'Failed to create student')
+        const errorMsg = response.error || response.message || 'Failed to create student'
+        setError(errorMsg)
+        console.error('Student creation failed:', errorMsg)
       }
     } catch (error) {
       console.error('Error creating student:', error)
@@ -111,14 +173,31 @@ export default function AddStudentModal({ onClose, onStudentAdded }) {
     }
   }
 
+  // Debug logging for credentials view
+  if (showCredentials) {
+    console.log('Rendering credentials view, createdStudent:', createdStudent ? {
+      name: createdStudent.name,
+      loginId: createdStudent.loginId,
+      hasPassword: !!createdStudent.password,
+      email: createdStudent.email
+    } : 'NULL')
+  }
+  
   if (showCredentials && createdStudent) {
     return (
-      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={onClose}>
+      <div 
+        className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" 
+        onClick={(e) => {
+          if (e.target === e.currentTarget) {
+            handleCloseModal()
+          }
+        }}
+      >
         <div className="bg-white rounded-xl shadow-2xl p-6 max-w-md w-full mx-4" onClick={(e) => e.stopPropagation()}>
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-xl font-semibold text-green-600">✅ Student Created Successfully!</h2>
             <button 
-              onClick={onClose}
+              onClick={handleCloseModal}
               className="text-gray-400 hover:text-gray-600 text-2xl"
             >
               ×
@@ -135,12 +214,16 @@ export default function AddStudentModal({ onClose, onStudentAdded }) {
                   <span className="font-medium">{createdStudent.name}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-gray-600">Login ID:</span>
-                  <span className="font-medium text-blue-600">{createdStudent.loginId}</span>
+                  <span className="text-gray-600">Login ID (RegNo):</span>
+                  <span className="font-medium text-blue-600">
+                    {createdStudent.loginId || createdStudent.regNo || 'NOT SET'}
+                  </span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-gray-600">Password:</span>
-                  <span className="font-medium text-red-600">{createdStudent.password}</span>
+                  <span className="font-medium text-red-600">
+                    {createdStudent.password || 'NOT SET'}
+                  </span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-gray-600">Email:</span>
@@ -156,7 +239,7 @@ export default function AddStudentModal({ onClose, onStudentAdded }) {
             </div>
 
             <button
-              onClick={onClose}
+              onClick={handleCloseModal}
               className="w-full px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors"
             >
               Done
@@ -168,12 +251,26 @@ export default function AddStudentModal({ onClose, onStudentAdded }) {
   }
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={onClose}>
+    <div 
+      className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" 
+      onClick={(e) => {
+        // Only close if clicking directly on the backdrop, not when dragging from input
+        if (e.target === e.currentTarget) {
+          handleCloseModal()
+        }
+      }}
+      onMouseDown={(e) => {
+        // Prevent closing when mouse down starts on backdrop
+        if (e.target === e.currentTarget) {
+          e.preventDefault()
+        }
+      }}
+    >
       <div className="bg-white rounded-xl shadow-2xl p-6 max-w-md w-full mx-4" onClick={(e) => e.stopPropagation()}>
         <div className="flex justify-between items-center mb-6">
           <h2 className="text-xl font-bold text-gray-800">Add New Student</h2>
           <button
-            onClick={onClose}
+            onClick={handleCloseModal}
             className="text-gray-400 hover:text-gray-600 text-2xl"
             disabled={isSubmitting}
           >
@@ -247,10 +344,15 @@ export default function AddStudentModal({ onClose, onStudentAdded }) {
               name="email"
               value={formData.email}
               onChange={handleInputChange}
+              onMouseDown={(e) => e.stopPropagation()}
+              onSelect={(e) => e.stopPropagation()}
+              onClick={(e) => e.stopPropagation()}
+              onFocus={(e) => e.stopPropagation()}
               className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
               placeholder="student@example.com"
               required
               disabled={isSubmitting}
+              autoComplete="off"
             />
           </div>
 
@@ -265,11 +367,16 @@ export default function AddStudentModal({ onClose, onStudentAdded }) {
               name="password"
               value={formData.password}
               onChange={handleInputChange}
+              onMouseDown={(e) => e.stopPropagation()}
+              onSelect={(e) => e.stopPropagation()}
+              onClick={(e) => e.stopPropagation()}
+              onFocus={(e) => e.stopPropagation()}
               className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
               placeholder="Enter password (min 6 characters)"
               required
               disabled={isSubmitting}
               minLength={6}
+              autoComplete="new-password"
             />
           </div>
 
@@ -284,7 +391,7 @@ export default function AddStudentModal({ onClose, onStudentAdded }) {
           <div className="flex gap-3 pt-4">
             <button
               type="button"
-              onClick={onClose}
+              onClick={handleCloseModal}
               className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors"
               disabled={isSubmitting}
             >

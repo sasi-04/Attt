@@ -2960,19 +2960,23 @@ app.get('/staff/students/by-department', async (req, res) => {
       }
     }
     
-    // STRICT YEAR ACCESS CONTROL for Class Advisors
+    // YEAR ACCESS CONTROL for Class Advisors
+    // Class advisors can VIEW all years in their department, but can only ADD students to their assigned year
+    // (Adding is controlled in the frontend, so we allow viewing all years here)
     console.log(`Year access check: isClassAdvisor=${staff.isClassAdvisor}, advisorFor=${JSON.stringify(staff.advisorFor)}, requestedYear="${year}"`)
-    if (staff.isClassAdvisor && staff.advisorFor && year && year !== 'All') {
-      console.log(`Comparing advisor year "${staff.advisorFor.year}" with requested year "${year}"`)
-      if (staff.advisorFor.year !== year) {
-        console.log(`Year access denied: Staff ${staffEmail} (advisor for ${staff.advisorFor.year}) cannot access ${year}`)
+    if (staff.isClassAdvisor && staff.advisorFor) {
+      // Verify the requested year is in the same department
+      const requestedDept = department || (staff.advisorFor.department)
+      if (requestedDept && requestedDept !== 'All' && requestedDept !== staff.advisorFor.department) {
+        console.log(`Department mismatch: Advisor for ${staff.advisorFor.department}, requested ${requestedDept}`)
         return res.status(403).json({ 
-          error: 'year_access_denied', 
-          message: `Access denied. You can only access students from ${staff.advisorFor.year}. Requested: ${year}`,
-          allowedYear: staff.advisorFor.year
+          error: 'department_access_denied', 
+          message: `Access denied. You can only access students from ${staff.advisorFor.department}`,
+          allowedDepartment: staff.advisorFor.department
         })
       }
-      console.log(`Year access granted: Staff can access ${year}`)
+      // Allow viewing all years in the same department
+      console.log(`Year access granted: Class advisor can view all years in ${staff.advisorFor.department}`)
     }
     
     const allStudents = await listAllStudents()
