@@ -137,13 +137,33 @@ export default function FaceEnrollmentModal({
     }))
 
     try {
+      // Resolve a valid string ID for enrollment, avoiding invalid values like 'NaN'
+      const candidates = [
+        student?.studentId,
+        student?.roll,
+        student?.regNo
+      ]
+      const resolvedId = candidates
+        .map(v => (v !== undefined && v !== null) ? String(v).trim() : '')
+        .find(v => v && v.toLowerCase() !== 'nan')
+
+      if (!resolvedId) {
+        throw Object.assign(new Error('invalid_student_id'), { code: 'invalid_student_id' })
+      }
+
       const enrollmentData = {
-        student_id: student.studentId || student.roll,
+        student_id: resolvedId,
+        roll_no: resolvedId,
         name: student.name,
-        department: student.dept,
-        email: student.contact,
+        department: student.dept || student.department,
+        email: student.contact || student.email,
         images: images
       }
+
+      console.log('=== FACE ENROLLMENT REQUEST ===')
+      console.log('Student object:', student)
+      console.log('Enrollment data:', enrollmentData)
+      console.log('Number of images:', images.length)
 
       const response = await apiPost('/face-recognition/enroll', enrollmentData)
 
@@ -156,7 +176,7 @@ export default function FaceEnrollmentModal({
 
         if (onEnrollmentComplete) {
           onEnrollmentComplete({
-            studentId: student.studentId || student.roll,
+            studentId: resolvedId,
             name: student.name,
             success: true
           })
@@ -171,18 +191,63 @@ export default function FaceEnrollmentModal({
       }
     } catch (error) {
       console.error('Enrollment error:', error)
+      console.error('Error code:', error.code)
+      console.error('Error status:', error.status)
+      console.error('Error message:', error.message)
+      
       let errorMessage = 'Unknown error'
       
-      if (error.code === 'network_error' || error.message.includes('network_error')) {
+      // Check for authorization errors first
+      if (error.status === 401 || error.code === 'authentication_required') {
+        errorMessage = 'Authentication required. Please log out and log back in.'
+      } else if (error.status === 403 || error.code === 'access_denied') {
+        const details = error.details || error.raw?.details || ''
+        errorMessage = `Access denied. Only class advisors can enroll student faces. ${details}`
+        if (details.includes('not currently assigned')) {
+          errorMessage += ' Please ensure you are assigned as an advisor in the admin panel, then log out and log back in.'
+        }
+      } else if (error.code === 'staff_not_found') {
+        errorMessage = 'Staff member not found. Please contact administrator.'
+      } else if (error.status === 503 || error.code === 'service_unavailable') {
+        // Check if it's actually unavailable or just missing dependencies
+        if (error.code === 'face_recognition_unavailable' || error.raw?.error === 'face_recognition_unavailable') {
+          const details = error.details || error.raw?.details || ''
+          errorMessage = '⚠️ Face recognition system is not available. ' + (details || 'Install insightface to enable face recognition features.')
+        } else {
+          errorMessage = '⚠️ Face Recognition Service is NOT running! Start the Python service on port 5001.'
+        }
+      } else if (error.code === 'face_recognition_unavailable' || error.raw?.error === 'face_recognition_unavailable') {
+        const details = error.details || error.raw?.details || ''
+        errorMessage = '⚠️ Face recognition system is not available. ' + (details || 'Install insightface to enable face recognition features.')
+      } else if (error.code === 'network_error' || error.message.includes('network_error')) {
         errorMessage = 'Face recognition service is not running. Please start the face recognition service first.'
       } else if (error.message.includes('fetch') || error.message.includes('Failed to fetch')) {
         errorMessage = 'Cannot connect to face recognition service. Please ensure it is running on port 5001.'
       } else if (error.message.includes('network') || error.message.includes('connection')) {
         errorMessage = 'Network error. Please check your connection and try again.'
-      } else if (error.status === 500) {
-        errorMessage = 'Server error during enrollment. Please try again.'
+      } else if (error.status === 500 || error.status === 504) {
+        const details = error.details || error.raw?.details || ''
+        const errorType = error.errorType || error.raw?.errorType || ''
+        const errorCode = error.errorCode || error.raw?.errorCode || ''
+        
+        if (error.status === 504 || error.code === 'service_timeout') {
+          errorMessage = '⏱️ Face recognition service timeout. The service may be overloaded. Please try again.'
+        } else if (error.code === 'service_error' || errorType === 'service_error') {
+          errorMessage = '⚠️ Face recognition service error. The service may not be running correctly.'
+        } else {
+          errorMessage = `Server error during enrollment: ${details || error.message || 'Please try again.'}`
+        }
+        
+        // Add more context if available
+        if (errorCode && errorCode !== 'UNKNOWN') {
+          errorMessage += ` (Error: ${errorCode})`
+        }
+      } else if (error.code === 'invalid_student_id') {
+        errorMessage = 'Missing or invalid student ID. Please ensure the student has a valid roll number/student ID.'
+      } else if (error.code === 'request_failed') {
+        errorMessage = 'Request failed. Check browser console (F12) for details. Ensure you are logged in properly.'
       } else {
-        errorMessage = error.message || 'Enrollment failed'
+        errorMessage = error.message || error.code || 'Enrollment failed'
       }
       
       setEnrollmentState(prev => ({

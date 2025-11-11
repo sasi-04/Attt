@@ -20,9 +20,41 @@ export default function StaffHierarchicalStudentView() {
   const [showAddStudent, setShowAddStudent] = useState(false)
 
   useEffect(() => {
-    // Get staff info
-    const user = JSON.parse(localStorage.getItem('ams_user') || '{}')
-    setStaffInfo(user)
+    // Load fresh staff info from server
+    const loadStaffInfo = async () => {
+      try {
+        const user = JSON.parse(localStorage.getItem('ams_user') || '{}')
+        
+        // Fetch fresh advisor info from server
+        const advisorInfo = await apiGet('/staff/advisor-info')
+        
+        // Merge with existing user data
+        const updatedUser = {
+          ...user,
+          isClassAdvisor: advisorInfo.isClassAdvisor,
+          advisorFor: advisorInfo.advisorFor,
+          canAddStudents: advisorInfo.canAddStudents
+        }
+        
+        setStaffInfo(updatedUser)
+        
+        // Update localStorage with fresh data
+        localStorage.setItem('ams_user', JSON.stringify(updatedUser))
+        
+        // Debug logging
+        console.log('=== STAFF INFO LOADED ===')
+        console.log('Is Class Advisor:', updatedUser.isClassAdvisor)
+        console.log('Advisor For:', updatedUser.advisorFor)
+        console.log('Can Add Students:', updatedUser.canAddStudents)
+      } catch (error) {
+        console.error('Failed to load advisor info:', error)
+        // Fallback to localStorage
+        const user = JSON.parse(localStorage.getItem('ams_user') || '{}')
+        setStaffInfo(user)
+      }
+    }
+    
+    loadStaffInfo()
     loadStudents()
     
     // Set up WebSocket listeners for real-time updates
@@ -159,11 +191,24 @@ export default function StaffHierarchicalStudentView() {
   }
 
   const isStudentEnrolled = (studentId, rollNo) => {
-    return enrolledStudents.some(enrolled => 
-      enrolled.student_id === studentId || 
-      enrolled.student_id === rollNo ||
-      enrolled.roll_no === rollNo
-    )
+    const normalizeId = (value) => {
+      const v = (value || '').toString().trim().toLowerCase()
+      if (!v || v === 'nan' || v.length < 4) return ''
+      return v
+    }
+
+    const sid = normalizeId(studentId)
+    const rno = normalizeId(rollNo)
+    if (!sid && !rno) return false
+
+    return enrolledStudents.some(enrolled => {
+      const eSid = normalizeId(enrolled?.student_id)
+      const eRno = normalizeId(enrolled?.roll_no)
+      if (!eSid && !eRno) return false
+      return (sid && eSid && eSid === sid) ||
+             (rno && eSid && eSid === rno) ||
+             (rno && eRno && eRno === rno)
+    })
   }
 
   const filteredStudents = useMemo(() => {
@@ -288,13 +333,15 @@ export default function StaffHierarchicalStudentView() {
                       <td className="py-2 pr-4">
                         {isStudentEnrolled(s.studentId, s.roll) ? (
                           <span className="text-green-600 text-sm">✅ Face Recognized</span>
-                        ) : (
+                        ) : staffInfo?.isClassAdvisor ? (
                           <button
                             onClick={() => handleFaceEnrollment(s)}
                             className="px-3 py-1 bg-blue-100 hover:bg-blue-200 text-blue-700 rounded text-sm transition-colors"
                           >
                             👤 Add Face
                           </button>
+                        ) : (
+                          <span className="text-gray-500 text-sm">Not Enrolled</span>
                         )}
                       </td>
                       <td className="py-2 pr-4">
@@ -382,7 +429,7 @@ export default function StaffHierarchicalStudentView() {
             setShowFaceEnrollment(false)
             setEnrollmentStudent(null)
           }}
-          onComplete={handleEnrollmentComplete}
+          onEnrollmentComplete={handleEnrollmentComplete}
         />
       )}
 

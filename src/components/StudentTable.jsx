@@ -61,9 +61,41 @@ export default function StudentTable(){
   useEffect(() => {
     fetchStudentData()
     
-    // Get staff info
-    const user = JSON.parse(localStorage.getItem('user') || '{}')
-    setStaffInfo(user)
+    // Load fresh staff info from server
+    const loadStaffInfo = async () => {
+      try {
+        const user = JSON.parse(localStorage.getItem('ams_user') || localStorage.getItem('user') || '{}')
+        
+        // Fetch fresh advisor info from server
+        const advisorInfo = await apiGet('/staff/advisor-info')
+        
+        // Merge with existing user data
+        const updatedUser = {
+          ...user,
+          isClassAdvisor: advisorInfo.isClassAdvisor,
+          advisorFor: advisorInfo.advisorFor,
+          canAddStudents: advisorInfo.canAddStudents
+        }
+        
+        setStaffInfo(updatedUser)
+        
+        // Update localStorage with fresh data
+        localStorage.setItem('ams_user', JSON.stringify(updatedUser))
+        
+        // Debug logging
+        console.log('=== STAFF INFO LOADED (StudentTable) ===')
+        console.log('Is Class Advisor:', updatedUser.isClassAdvisor)
+        console.log('Advisor For:', updatedUser.advisorFor)
+        console.log('Can Add Students:', updatedUser.canAddStudents)
+      } catch (error) {
+        console.error('Failed to load advisor info:', error)
+        // Fallback to localStorage
+        const user = JSON.parse(localStorage.getItem('ams_user') || localStorage.getItem('user') || '{}')
+        setStaffInfo(user)
+      }
+    }
+    
+    loadStaffInfo()
     
     // Set up WebSocket listeners for real-time updates
     const socket = getSocket()
@@ -116,9 +148,24 @@ export default function StudentTable(){
 
   // Check if student is enrolled in face recognition
   const isStudentEnrolled = (studentId, rollNo) => {
-    return enrolledStudents.some(enrolled => 
-      enrolled.student_id === studentId || enrolled.student_id === rollNo
-    )
+    const normalizeId = (value) => {
+      const v = (value || '').toString().trim().toLowerCase()
+      if (!v || v === 'nan' || v.length < 4) return ''
+      return v
+    }
+
+    const sid = normalizeId(studentId)
+    const rno = normalizeId(rollNo)
+    if (!sid && !rno) return false
+
+    return enrolledStudents.some(enrolled => {
+      const eSid = normalizeId(enrolled?.student_id)
+      const eRno = normalizeId(enrolled?.roll_no)
+      if (!eSid && !eRno) return false
+      return (sid && eSid && eSid === sid) ||
+             (rno && eSid && eSid === rno) ||
+             (rno && eRno && eRno === rno)
+    })
   }
 
   const handleAddStudent = () => {
@@ -228,13 +275,17 @@ export default function StudentTable(){
                       <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
                         ✅ Face Recognized
                       </span>
-                    ) : (
+                    ) : staffInfo?.isClassAdvisor ? (
                       <button
                         onClick={() => handleFaceEnrollment(s)}
                         className="px-3 py-1 rounded-md bg-purple-600 text-white text-xs hover:bg-purple-700 transition-colors"
                       >
                         👤 Add Face
                       </button>
+                    ) : (
+                      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600">
+                        Not Enrolled
+                      </span>
                     )}
                   </td>
                   <td className="py-2 pr-4">

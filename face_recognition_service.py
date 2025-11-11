@@ -18,21 +18,45 @@ import time
 import requests
 from concurrent.futures import ThreadPoolExecutor
 import logging
-from face_attendance_system import FaceAttendanceSystem
 
-# Configure logging
+# Configure logging first
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# Try to import face recognition system, but make it optional
+try:
+    from face_attendance_system import FaceAttendanceSystem
+    FACE_RECOGNITION_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"Face recognition system not available: {e}")
+    logger.warning("Service will start but face recognition features will be disabled.")
+    logger.warning("Install required dependencies: pip install insightface")
+    FACE_RECOGNITION_AVAILABLE = False
+    FaceAttendanceSystem = None
+except Exception as e:
+    logger.error(f"Error importing face recognition system: {e}")
+    FACE_RECOGNITION_AVAILABLE = False
+    FaceAttendanceSystem = None
 
 app = Flask(__name__)
 CORS(app, origins=["http://localhost:5173", "http://localhost:3000", "http://localhost:4000"])
 
-# Initialize face recognition system
-face_system = FaceAttendanceSystem(
-    similarity_threshold=0.4,
-    presence_frames=3,  # Reduced for faster response
-    data_dir="data"
-)
+# Initialize face recognition system (if available)
+face_system = None
+if FACE_RECOGNITION_AVAILABLE:
+    try:
+        face_system = FaceAttendanceSystem(
+            similarity_threshold=0.4,
+            presence_frames=3,  # Reduced for faster response
+            data_dir="data"
+        )
+        logger.info("Face recognition system initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize face recognition system: {e}")
+        FACE_RECOGNITION_AVAILABLE = False
+        face_system = None
+else:
+    logger.warning("Face recognition system is not available - service running in limited mode")
 
 # Thread pool for concurrent processing
 executor = ThreadPoolExecutor(max_workers=4)
@@ -87,17 +111,33 @@ session_manager = RecognitionSession()
 @app.route('/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
-    return jsonify({
+    response = {
         'status': 'healthy',
         'service': 'face_recognition',
         'timestamp': datetime.now().isoformat(),
-        'enrolled_students': len(face_system.student_embeddings),
-        'active_sessions': len([s for s in session_manager.sessions.values() if s['active']])
-    })
+        'face_recognition_available': FACE_RECOGNITION_AVAILABLE
+    }
+    
+    if face_system:
+        response['enrolled_students'] = len(face_system.student_embeddings)
+    else:
+        response['enrolled_students'] = 0
+        response['warning'] = 'Face recognition system not initialized. Install insightface to enable face recognition features.'
+    
+    response['active_sessions'] = len([s for s in session_manager.sessions.values() if s['active']])
+    
+    return jsonify(response)
 
 @app.route('/students', methods=['GET'])
 def get_enrolled_students():
     """Get list of enrolled students for face recognition"""
+    if not FACE_RECOGNITION_AVAILABLE or not face_system:
+        return jsonify({
+            'students': [],
+            'total_count': 0,
+            'warning': 'Face recognition system not available'
+        })
+    
     students = []
     for name, data in face_system.student_embeddings.items():
         students.append({
@@ -124,6 +164,13 @@ def enroll_student():
         "images": ["base64_image1", "base64_image2", ...]
     }
     """
+    if not FACE_RECOGNITION_AVAILABLE or not face_system:
+        return jsonify({
+            'error': 'face_recognition_unavailable',
+            'message': 'Face recognition system is not available. Please install required dependencies.',
+            'details': 'Install insightface: pip install insightface (requires Microsoft Visual C++ Build Tools on Windows)'
+        }), 503
+    
     try:
         data = request.get_json()
         student_id = data.get('student_id')

@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Test Face Enrollment API</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 900px;
+      margin: 50px auto;
+      padding: 20px;
+    }
+    .section {
+      background: #f5f5f5;
+      padding: 20px;
+      margin: 20px 0;
+      border-radius: 8px;
+    }
+    .success { background: #d4edda; color: #155724; }
+    .error { background: #f8d7da; color: #721c24; }
+    .info { background: #d1ecf1; color: #0c5460; }
+    button {
+      padding: 10px 20px;
+      background: #007bff;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      margin: 5px;
+    }
+    button:hover { background: #0056b3; }
+    input, textarea {
+      padding: 10px;
+      width: 100%;
+      margin: 10px 0;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+    }
+    pre {
+      background: #282c34;
+      color: #abb2bf;
+      padding: 15px;
+      border-radius: 4px;
+      overflow-x: auto;
+      max-height: 400px;
+    }
+    .step { font-weight: bold; color: #007bff; margin-top: 15px; }
+  </style>
+</head>
+<body>
+  <h1>🧪 Test Face Enrollment API</h1>
+  <p>Use this tool to diagnose face enrollment issues</p>
+
+  <!-- Step 1: Check Staff Status -->
+  <div class="section">
+    <h2>Step 1: Check Your Staff Status</h2>
+    <input type="email" id="staffEmail" placeholder="Enter staff email" />
+    <button onclick="checkStaffStatus()">Check Status</button>
+    <div id="staffResult"></div>
+  </div>
+
+  <!-- Step 2: Check localStorage -->
+  <div class="section">
+    <h2>Step 2: Check localStorage</h2>
+    <button onclick="checkLocalStorage()">View localStorage Data</button>
+    <div id="localStorageResult"></div>
+  </div>
+
+  <!-- Step 3: Test API Headers -->
+  <div class="section">
+    <h2>Step 3: Test API Request Headers</h2>
+    <button onclick="testAPIHeaders()">Test Headers</button>
+    <div id="headersResult"></div>
+  </div>
+
+  <!-- Step 4: Test Full Enrollment (without images) -->
+  <div class="section">
+    <h2>Step 4: Test Enrollment Endpoint (Dry Run)</h2>
+    <p>This will test the endpoint without actual face images</p>
+    <input type="text" id="testStudentId" placeholder="Student ID (e.g., CSE2001)" />
+    <input type="text" id="testStudentName" placeholder="Student Name" />
+    <input type="text" id="testDepartment" placeholder="Department (e.g., CSE)" />
+    <button onclick="testEnrollment()">Test Enrollment</button>
+    <div id="enrollmentResult"></div>
+  </div>
+
+  <!-- Console Log -->
+  <div class="section">
+    <h2>📋 Console Log</h2>
+    <pre id="consoleLog"></pre>
+    <button onclick="clearLog()">Clear Log</button>
+  </div>
+
+  <script>
+    let log = []
+    
+    function addLog(message, type = 'info') {
+      const timestamp = new Date().toLocaleTimeString()
+      log.push(`[${timestamp}] ${message}`)
+      updateLog()
+    }
+    
+    function updateLog() {
+      document.getElementById('consoleLog').textContent = log.join('\n')
+    }
+    
+    function clearLog() {
+      log = []
+      updateLog()
+    }
+
+    async function checkStaffStatus() {
+      const email = document.getElementById('staffEmail').value
+      const resultDiv = document.getElementById('staffResult')
+      
+      if (!email) {
+        resultDiv.innerHTML = '<div class="error">Please enter an email</div>'
+        return
+      }
+      
+      addLog(`Checking staff status for: ${email}`)
+      resultDiv.innerHTML = '<div class="info">Loading...</div>'
+      
+      try {
+        const response = await fetch(`/api/staff/advisor-info?staffEmail=${encodeURIComponent(email)}`)
+        const data = await response.json()
+        
+        addLog(`Response status: ${response.status}`)
+        addLog(`Response data: ${JSON.stringify(data, null, 2)}`)
+        
+        if (!response.ok) {
+          resultDiv.innerHTML = `<div class="error">
+            <h3>❌ Error</h3>
+            <pre>${JSON.stringify(data, null, 2)}</pre>
+          </div>`
+          return
+        }
+        
+        const isAdvisor = data.isClassAdvisor
+        resultDiv.innerHTML = `<div class="${isAdvisor ? 'success' : 'info'}">
+          <h3>${isAdvisor ? '✅ Is Class Advisor' : 'ℹ️ Not Class Advisor'}</h3>
+          <pre>${JSON.stringify(data, null, 2)}</pre>
+          ${isAdvisor ? '<p><strong>✅ Can add faces</strong></p>' : '<p><strong>❌ Cannot add faces</strong></p>'}
+        </div>`
+        
+      } catch (error) {
+        addLog(`Error: ${error.message}`, 'error')
+        resultDiv.innerHTML = `<div class="error">Network error: ${error.message}</div>`
+      }
+    }
+
+    function checkLocalStorage() {
+      const resultDiv = document.getElementById('localStorageResult')
+      
+      addLog('Checking localStorage...')
+      
+      const amsUser = localStorage.getItem('ams_user')
+      const user = localStorage.getItem('user')
+      
+      let html = '<div class="info">'
+      
+      if (amsUser) {
+        html += '<h4>ams_user:</h4>'
+        html += `<pre>${JSON.stringify(JSON.parse(amsUser), null, 2)}</pre>`
+        addLog('Found ams_user in localStorage')
+      } else {
+        html += '<p>❌ No ams_user found</p>'
+        addLog('No ams_user in localStorage', 'error')
+      }
+      
+      if (user) {
+        html += '<h4>user:</h4>'
+        html += `<pre>${JSON.stringify(JSON.parse(user), null, 2)}</pre>`
+        addLog('Found user in localStorage')
+      } else {
+        html += '<p>❌ No user found</p>'
+      }
+      
+      html += '</div>'
+      resultDiv.innerHTML = html
+    }
+
+    async function testAPIHeaders() {
+      const resultDiv = document.getElementById('headersResult')
+      
+      addLog('Testing API headers...')
+      
+      const user = JSON.parse(localStorage.getItem('ams_user') || localStorage.getItem('user') || '{}')
+      const headers = { 'Content-Type': 'application/json' }
+      
+      if (user.email) {
+        headers['x-staff-email'] = user.email
+        addLog(`Staff email header: ${user.email}`)
+      } else {
+        addLog('WARNING: No staff email found in localStorage!', 'error')
+      }
+      
+      resultDiv.innerHTML = `<div class="info">
+        <h4>Headers that would be sent:</h4>
+        <pre>${JSON.stringify(headers, null, 2)}</pre>
+        ${!user.email ? '<p class="error">⚠️ Missing staff email! This will cause authorization to fail.</p>' : '<p class="success">✅ Staff email present</p>'}
+      </div>`
+    }
+
+    async function testEnrollment() {
+      const studentId = document.getElementById('testStudentId').value
+      const studentName = document.getElementById('testStudentName').value
+      const department = document.getElementById('testDepartment').value
+      const resultDiv = document.getElementById('enrollmentResult')
+      
+      if (!studentId || !studentName || !department) {
+        resultDiv.innerHTML = '<div class="error">Please fill all fields</div>'
+        return
+      }
+      
+      addLog('Testing enrollment endpoint...')
+      resultDiv.innerHTML = '<div class="info">Testing...</div>'
+      
+      try {
+        const user = JSON.parse(localStorage.getItem('ams_user') || localStorage.getItem('user') || '{}')
+        const headers = { 'Content-Type': 'application/json' }
+        
+        if (user.email) {
+          headers['x-staff-email'] = user.email
+          addLog(`Using staff email: ${user.email}`)
+        } else {
+          addLog('ERROR: No staff email found!', 'error')
+        }
+        
+        const enrollmentData = {
+          student_id: studentId,
+          name: studentName,
+          department: department,
+          email: `${studentId}@test.com`,
+          images: ['dummy_base64_data'] // Dummy image for testing
+        }
+        
+        addLog('Sending request...')
+        addLog(`Enrollment data: ${JSON.stringify(enrollmentData, null, 2)}`)
+        
+        const response = await fetch('/api/face-recognition/enroll', {
+          method: 'POST',
+          headers: headers,
+          body: JSON.stringify(enrollmentData)
+        })
+        
+        addLog(`Response status: ${response.status}`)
+        
+        const text = await response.text()
+        let data = {}
+        try {
+          data = text ? JSON.parse(text) : {}
+        } catch (e) {
+          data = { raw: text }
+        }
+        
+        addLog(`Response data: ${JSON.stringify(data, null, 2)}`)
+        
+        if (!response.ok) {
+          resultDiv.innerHTML = `<div class="error">
+            <h3>❌ Request Failed</h3>
+            <p><strong>Status:</strong> ${response.status}</p>
+            <p><strong>Error:</strong> ${data.error || 'Unknown'}</p>
+            <p><strong>Message:</strong> ${data.message || 'No message'}</p>
+            <pre>${JSON.stringify(data, null, 2)}</pre>
+          </div>`
+        } else {
+          resultDiv.innerHTML = `<div class="success">
+            <h3>✅ Request Successful</h3>
+            <pre>${JSON.stringify(data, null, 2)}</pre>
+          </div>`
+        }
+        
+      } catch (error) {
+        addLog(`Error: ${error.message}`, 'error')
+        resultDiv.innerHTML = `<div class="error">
+          <h3>❌ Network Error</h3>
+          <p>${error.message}</p>
+        </div>`
+      }
+    }
+    
+    // Auto-load localStorage on page load
+    window.addEventListener('load', () => {
+      checkLocalStorage()
+    })
+  </script>
+</body>
+</html>

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { staffApi, adminApi } from './api.js'
+import { staffApi, adminApi, apiGet } from './api.js'
 import AddStudentModal from './AddStudentModal.jsx'
+import FaceEnrollmentModal from './FaceEnrollmentModal.jsx'
 
 export default function StaffDepartmentView() {
   const [viewLevel, setViewLevel] = useState('years') // 'years', 'students' - removed 'departments'
@@ -12,6 +13,9 @@ export default function StaffDepartmentView() {
   const [staffInfo, setStaffInfo] = useState(null)
   const [showAddStudent, setShowAddStudent] = useState(false)
   const [staffDepartment, setStaffDepartment] = useState(null)
+  const [showFaceEnrollment, setShowFaceEnrollment] = useState(false)
+  const [enrollmentStudent, setEnrollmentStudent] = useState(null)
+  const [enrolledStudents, setEnrolledStudents] = useState([])
 
   // Load years directly from staff's department
   const loadYears = useCallback(async () => {
@@ -124,16 +128,56 @@ export default function StaffDepartmentView() {
   }, [])
 
   useEffect(() => {
-    // Get staff info and load years
-    const user = JSON.parse(localStorage.getItem('ams_user') || '{}')
-    setStaffInfo(user)
-    
-    if (user.email) {
-      loadYears()
-    } else {
-      setLoading(false)
-      setMessage('Authentication required. Please log in again.')
+    // Load fresh staff info from server
+    const loadStaffInfo = async () => {
+      try {
+        const user = JSON.parse(localStorage.getItem('ams_user') || '{}')
+        
+        if (!user.email) {
+          setLoading(false)
+          setMessage('Authentication required. Please log in again.')
+          return
+        }
+        
+        // Fetch fresh advisor info from server
+        const advisorInfo = await apiGet('/staff/advisor-info')
+        
+        // Merge with existing user data
+        const updatedUser = {
+          ...user,
+          isClassAdvisor: advisorInfo.isClassAdvisor,
+          advisorFor: advisorInfo.advisorFor,
+          canAddStudents: advisorInfo.canAddStudents
+        }
+        
+        setStaffInfo(updatedUser)
+        localStorage.setItem('ams_user', JSON.stringify(updatedUser))
+        
+        console.log('=== STAFF INFO LOADED (StaffDepartmentView) ===')
+        console.log('Is Class Advisor:', updatedUser.isClassAdvisor)
+        console.log('Advisor For:', updatedUser.advisorFor)
+        
+        // Load face recognition enrolled students
+        try {
+          const faceResponse = await apiGet('/face-recognition/students')
+          setEnrolledStudents(faceResponse.students || [])
+        } catch (faceError) {
+          console.error('Face recognition service not available:', faceError)
+          setEnrolledStudents([])
+        }
+        
+        loadYears()
+      } catch (error) {
+        console.error('Failed to load advisor info:', error)
+        const user = JSON.parse(localStorage.getItem('ams_user') || '{}')
+        setStaffInfo(user)
+        if (user.email) {
+          loadYears()
+        }
+      }
     }
+    
+    loadStaffInfo()
   }, [loadYears])
 
   const loadStudents = async (department, year) => {
@@ -243,6 +287,60 @@ export default function StaffDepartmentView() {
         loadStudents(staffDepartment, selectedYear.name)
       }
     }, 1500)
+  }
+
+  const handleFaceEnrollment = (student) => {
+    console.log('=== FACE ENROLLMENT INITIATED ===')
+    console.log('Student data:', student)
+    console.log('Staff info:', staffInfo)
+    
+    // Ensure student data has all required fields with proper property names
+    const studentData = {
+      studentId: student.studentId || student.regNo || student.roll,
+      regNo: student.regNo || student.studentId || student.roll,
+      roll: student.regNo || student.studentId || student.roll,
+      name: student.name,
+      department: student.department || staffDepartment,
+      dept: student.department || staffDepartment,
+      email: student.email || student.contact,
+      contact: student.email || student.contact
+    }
+    
+    console.log('Normalized student data:', studentData)
+    setEnrollmentStudent(studentData)
+    setShowFaceEnrollment(true)
+  }
+
+  const handleEnrollmentComplete = async (result) => {
+    console.log('Enrollment completed:', result)
+    try {
+      const enrolledResponse = await apiGet('/face-recognition/students')
+      setEnrolledStudents(enrolledResponse.students || [])
+    } catch (error) {
+      console.error('Failed to refresh enrolled students:', error)
+    }
+  }
+
+  const isStudentEnrolled = (studentId, rollNo) => {
+    const normalizeId = (value) => {
+      const v = (value || '').toString().trim().toLowerCase()
+      // Ignore obviously invalid ids like 'nan', empty, or too short
+      if (!v || v === 'nan' || v.length < 4) return ''
+      return v
+    }
+
+    const sid = normalizeId(studentId)
+    const rno = normalizeId(rollNo)
+    if (!sid && !rno) return false
+
+    return enrolledStudents.some(enrolled => {
+      const eSid = normalizeId(enrolled?.student_id)
+      const eRno = normalizeId(enrolled?.roll_no)
+      if (!eSid && !eRno) return false
+      return (sid && eSid && eSid === sid) ||
+             (rno && eSid && eSid === rno) ||
+             (rno && eRno && eRno === rno)
+    })
   }
 
   // Check if staff can add students to this year
@@ -389,13 +487,14 @@ export default function StaffDepartmentView() {
                   <th className="py-3 px-4 text-left">Email</th>
                   <th className="py-3 px-4 text-left">Attendance</th>
                   <th className="py-3 px-4 text-left">Status</th>
+                  <th className="py-3 px-4 text-left">Face Recognition</th>
                   <th className="py-3 px-4 text-left">Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {students.length === 0 ? (
                   <tr>
-                    <td colSpan="6" className="py-8 text-center text-gray-500">
+                    <td colSpan="7" className="py-8 text-center text-gray-500">
                       No students found
                       {canAddStudents() && (
                         <div className="mt-2">
@@ -430,6 +529,20 @@ export default function StaffDepartmentView() {
                         </span>
                       </td>
                       <td className="py-3 px-4">
+                        {isStudentEnrolled(student.studentId, student.regNo) ? (
+                          <span className="text-green-600 text-sm">✅ Enrolled</span>
+                        ) : staffInfo?.isClassAdvisor && isClassAdvisorForYear(selectedYear.name) ? (
+                          <button
+                            onClick={() => handleFaceEnrollment(student)}
+                            className="px-3 py-1 bg-blue-100 hover:bg-blue-200 text-blue-700 rounded text-sm transition-colors"
+                          >
+                            👤 Add Face
+                          </button>
+                        ) : (
+                          <span className="text-gray-500 text-sm">Not Enrolled</span>
+                        )}
+                      </td>
+                      <td className="py-3 px-4">
                         <button className="px-3 py-1 bg-blue-100 hover:bg-blue-200 text-blue-700 rounded text-sm transition-colors">
                           View Profile
                         </button>
@@ -449,6 +562,15 @@ export default function StaffDepartmentView() {
           key={showAddStudent ? 'add-student-modal' : null}
           onClose={() => setShowAddStudent(false)}
           onStudentAdded={handleStudentAdded}
+        />
+      )}
+
+      {/* Face Enrollment Modal */}
+      {showFaceEnrollment && enrollmentStudent && (
+        <FaceEnrollmentModal
+          student={enrollmentStudent}
+          onClose={() => setShowFaceEnrollment(false)}
+          onEnrollmentComplete={handleEnrollmentComplete}
         />
       )}
     </div>

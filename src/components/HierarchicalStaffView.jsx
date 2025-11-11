@@ -199,19 +199,21 @@ export default function HierarchicalStaffView() {
 
   const openEditModal = (staffMember) => {
     setSelectedStaff(staffMember)
+    const staffDept = staffMember.department || selectedDept?.name || 'M.Tech'
     setFormData({
       name: staffMember.name,
       email: staffMember.email,
-      department: staffMember.department || 'M.Tech',
+      department: staffDept,
       designation: staffMember.designation,
       contact: staffMember.contact || '',
       isClassAdvisor: staffMember.isClassAdvisor || false,
       advisorYear: staffMember.advisorFor?.year || ''
     })
     
-    // Load available years if staff is currently a class advisor
-    if (staffMember.isClassAdvisor && staffMember.department) {
-      loadAvailableYears(staffMember.department)
+    // Always load available years for the staff's department (important for new departments)
+    // This ensures years are available even if the department is new
+    if (staffDept) {
+      loadAvailableYears(staffDept)
     }
     
     setShowEditModal(true)
@@ -348,44 +350,52 @@ export default function HierarchicalStaffView() {
   const handleEditStaff = async (e) => {
     e.preventDefault()
     try {
-      // Update staff basic information
-      await adminApi.updateStaff(selectedStaff.id, formData)
-      
-      // If this staff is assigned as class advisor, assign them to hierarchy
-      if (formData.isClassAdvisor && formData.advisorYear) {
-        try {
-          console.log('Assigning class advisor to hierarchy:', {
-            staffId: formData.email,
-            department: formData.department,
-            year: formData.advisorYear,
-            isClassAdvisor: true
-          })
-          
-          const hierarchyResponse = await fetch('/admin/hierarchy/assign-staff', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              staffId: formData.email,
-              department: formData.department,
-              year: formData.advisorYear,
-              isClassAdvisor: true
-            })
-          })
-          
-          if (!hierarchyResponse.ok) {
-            console.error('Failed to assign hierarchy')
-          }
-        } catch (hierarchyError) {
-          console.error('Hierarchy assignment error:', hierarchyError)
-        }
+      // Validate advisor assignment
+      if (formData.isClassAdvisor && !formData.advisorYear) {
+        setMessage('Please select a year for class advisor assignment')
+        return
       }
       
-      setMessage(`Staff updated successfully!${formData.isClassAdvisor ? ' Assigned as class advisor for ' + formData.advisorYear : ''}`)
+      // Ensure department is set (use selectedDept if not in formData)
+      const updateData = {
+        ...formData,
+        department: formData.department || selectedDept?.name
+      }
+      
+      // Ensure isClassAdvisor is a boolean
+      if (updateData.isClassAdvisor !== undefined) {
+        updateData.isClassAdvisor = Boolean(updateData.isClassAdvisor)
+      }
+      
+      console.log('Sending update data:', updateData)
+      console.log('Selected staff ID:', selectedStaff.id)
+      
+      // Update staff - backend will handle advisor assignment automatically
+      await adminApi.updateStaff(selectedStaff.id, updateData)
+      
+      const successMessage = formData.isClassAdvisor && formData.advisorYear
+        ? `Staff updated successfully! Assigned as class advisor for ${updateData.department} ${formData.advisorYear}`
+        : formData.isClassAdvisor === false
+        ? 'Staff updated successfully! Advisor status removed.'
+        : 'Staff updated successfully!'
+      
+      setMessage(successMessage)
       setShowEditModal(false)
-      loadStaff(selectedDept.name)
+      
+      // Wait a moment for backend to complete, then refresh
+      setTimeout(async () => {
+        await loadStaff(selectedDept.name)
+        // Trigger hierarchy refresh event for other components
+        window.dispatchEvent(new CustomEvent('hierarchy-updated'))
+      }, 500)
     } catch (error) {
       console.error('Edit staff error:', error)
-      setMessage('Failed to update staff')
+      // Handle advisor conflict error
+      if (error.code === 'advisor_exists' || error.message?.includes('advisor')) {
+        setMessage(error.message || 'Another staff member is already assigned as advisor for this year')
+      } else {
+        setMessage(error.message || 'Failed to update staff')
+      }
     }
   }
 
@@ -859,13 +869,17 @@ export default function HierarchicalStaffView() {
                     id="isClassAdvisor" 
                     checked={formData.isClassAdvisor}
                     onChange={(e) => {
-                      console.log('Class advisor checkbox changed:', e.target.checked)
-                      console.log('Selected department:', selectedDept?.name)
-                      setFormData({...formData, isClassAdvisor: e.target.checked})
-                      if (e.target.checked && selectedDept?.name) {
-                        console.log('Loading years for department:', selectedDept.name)
-                        loadAvailableYears(selectedDept.name)
-                      } else if (e.target.checked) {
+                      const checked = e.target.checked
+                      const dept = formData.department || selectedDept?.name
+                      setFormData({
+                        ...formData, 
+                        isClassAdvisor: checked,
+                        advisorYear: checked ? formData.advisorYear : '' // Clear advisorYear when unchecked
+                      })
+                      if (checked && dept) {
+                        console.log('Loading years for department:', dept)
+                        loadAvailableYears(dept)
+                      } else if (checked) {
                         console.warn('No department selected, cannot load years')
                       }
                     }}
@@ -904,7 +918,7 @@ export default function HierarchicalStaffView() {
                     )}
                     {formData.advisorYear && (
                       <p className="text-xs text-blue-600 mt-1">
-                        This staff will be assigned as class advisor for {selectedDept.name} {formData.advisorYear}
+                        This staff will be assigned as class advisor for {formData.department || selectedDept?.name} {formData.advisorYear}
                       </p>
                     )}
                   </div>
@@ -946,7 +960,23 @@ export default function HierarchicalStaffView() {
               {/* Department Selection */}
               <select 
                 value={formData.department} 
-                onChange={(e) => setFormData({...formData, department: e.target.value})} 
+                onChange={(e) => {
+                  const newDept = e.target.value
+                  const oldDept = formData.department
+                  
+                  // Clear advisorYear when department changes to ensure consistency
+                  // Admin must explicitly select year for the new department
+                  setFormData({
+                    ...formData, 
+                    department: newDept,
+                    advisorYear: oldDept !== newDept ? '' : formData.advisorYear
+                  })
+                  
+                  // Reload years if class advisor is checked and department changed
+                  if (formData.isClassAdvisor && newDept && oldDept !== newDept) {
+                    loadAvailableYears(newDept)
+                  }
+                }} 
                 className="w-full px-3 py-2 border rounded-lg"
               >
                 <option value="M.Tech">M.Tech</option>
@@ -964,9 +994,15 @@ export default function HierarchicalStaffView() {
                     id="editIsClassAdvisor" 
                     checked={formData.isClassAdvisor}
                     onChange={(e) => {
-                      setFormData({...formData, isClassAdvisor: e.target.checked})
-                      if (e.target.checked && formData.department) {
-                        loadAvailableYears(formData.department)
+                      const checked = e.target.checked
+                      const dept = formData.department || selectedDept?.name
+                      setFormData({
+                        ...formData, 
+                        isClassAdvisor: checked,
+                        advisorYear: checked ? formData.advisorYear : '' // Clear advisorYear when unchecked
+                      })
+                      if (checked && dept) {
+                        loadAvailableYears(dept)
                       }
                     }}
                     className="mr-2 h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
@@ -976,7 +1012,7 @@ export default function HierarchicalStaffView() {
                   </label>
                 </div>
                 
-                {formData.isClassAdvisor && (
+                    {formData.isClassAdvisor && (
                   <div>
                     <label className="block text-sm font-medium text-blue-700 mb-1">Select Year:</label>
                     {loadingYears ? (
@@ -994,6 +1030,11 @@ export default function HierarchicalStaffView() {
                           <option key={year} value={year}>{year}</option>
                         ))}
                       </select>
+                    )}
+                    {formData.advisorYear && (
+                      <p className="text-xs text-blue-600 mt-1">
+                        This staff will be assigned as class advisor for {formData.department || selectedDept?.name} {formData.advisorYear}
+                      </p>
                     )}
                   </div>
                 )}

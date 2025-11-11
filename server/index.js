@@ -39,7 +39,9 @@ function broadcastAdminUpdate(eventType, data) {
 }
 
 app.use(cors({ origin: allowedOrigins }))
-app.use(express.json())
+// Increase payload limit for face enrollment images (base64 images are large)
+app.use(express.json({ limit: '50mb' }))
+app.use(express.urlencoded({ limit: '50mb', extended: true }))
 
 // Debug endpoint to check what's connected vs what should be connected
 app.get('/debug/connection-status', async (req, res) => {
@@ -2114,7 +2116,293 @@ app.put('/admin/staff/:id', async (req, res) => {
       return res.status(404).json({ error: 'staff_not_found' })
     }
     
-    await updateStaff(id, updates)
+    // Handle advisor assignment if isClassAdvisor and advisorYear are provided
+    // Convert to boolean if it's a string (from form data)
+    const isClassAdvisor = updates.isClassAdvisor === true || updates.isClassAdvisor === 'true' || updates.isClassAdvisor === 1
+    const advisorYear = updates.advisorYear
+    const department = updates.department || staff.department
+    
+    console.log('=== STAFF UPDATE DEBUG ===')
+    console.log('Staff ID:', id)
+    console.log('Staff name:', staff.name)
+    console.log('Updates received:', JSON.stringify(updates, null, 2))
+    console.log('isClassAdvisor (raw):', updates.isClassAdvisor, 'type:', typeof updates.isClassAdvisor)
+    console.log('isClassAdvisor (converted):', isClassAdvisor)
+    console.log('advisorYear:', advisorYear)
+    console.log('department:', department)
+    
+    // If being assigned as class advisor
+    if (isClassAdvisor && advisorYear && department) {
+      console.log('Processing advisor assignment...')
+      
+      // Check if this staff was previously an advisor for a different department-year
+      const wasPreviouslyAdvisor = staff.isClassAdvisor && staff.advisorFor
+      const previousDeptYear = wasPreviouslyAdvisor 
+        ? `${staff.advisorFor.department}:${staff.advisorFor.year}` 
+        : null
+      const newDeptYear = `${department}:${advisorYear}`
+      
+      console.log('Previous advisor assignment:', previousDeptYear)
+      console.log('New advisor assignment:', newDeptYear)
+      
+      // Ensure the year exists in the department (create year placeholder if needed)
+      // This is important for new departments that don't have years set up yet
+      try {
+        const allStudents = await listAllStudents()
+        const yearExists = allStudents.some(student => 
+          student.department === department && 
+          student.year === advisorYear &&
+          (student.isYearPlaceholder || !student.isPlaceholder)
+        )
+        
+        if (!yearExists) {
+          console.log(`Year ${advisorYear} does not exist in department ${department}, creating year placeholder...`)
+          const placeholderRegNo = `year_${department.toLowerCase().replace(/\s+/g, '')}_${advisorYear.toLowerCase().replace(/\s+/g, '')}_placeholder`
+          
+          // Check if placeholder already exists (race condition protection)
+          const existingPlaceholder = await dbGetStudentByRegNo(placeholderRegNo)
+          if (!existingPlaceholder) {
+            try {
+              await dbCreateStudent({
+                regNo: placeholderRegNo,
+                studentId: placeholderRegNo,
+                name: `[Year: ${advisorYear} - ${department}]`,
+                password: 'system_placeholder',
+                email: `year.${department.toLowerCase().replace(/\s+/g, '')}.${advisorYear.toLowerCase().replace(/\s+/g, '')}.placeholder@system.internal`,
+                department: department,
+                year: advisorYear,
+                status: 'placeholder',
+                isPlaceholder: true,
+                isYearPlaceholder: true,
+                createdAt: new Date().toISOString()
+              })
+              console.log(`Year placeholder created for ${department} ${advisorYear}`)
+              
+              // Broadcast year creation
+              broadcastAdminUpdate('year-created', {
+                department: department,
+                year: advisorYear
+              })
+            } catch (yearError) {
+              console.error('Failed to create year placeholder:', yearError)
+              // Continue anyway - the year might exist but not be found, or creation might fail
+              // The advisor assignment should still work
+            }
+          }
+        }
+      } catch (yearCheckError) {
+        console.error('Error checking for year existence:', yearCheckError)
+        // Continue with advisor assignment even if year check fails
+      }
+      
+      // Check if department-year already has an advisor (excluding current staff)
+      // Also remove advisor status from ANY existing advisor for this department-year
+      const allStaff = await listStaff()
+      const existingAdvisors = allStaff.filter(s => 
+        s.advisorFor?.department === department && 
+        s.advisorFor?.year === advisorYear && 
+        s.id !== id &&
+        s.isClassAdvisor === true
+      )
+      
+      console.log(`Found ${existingAdvisors.length} existing advisor(s) for ${department} ${advisorYear}`)
+      
+      // Remove advisor status from ALL existing advisors for this department-year
+      for (const existingAdvisor of existingAdvisors) {
+        console.log(`Removing advisor status from: ${existingAdvisor.name} (${existingAdvisor.id})`)
+        
+        try {
+          // Remove advisor status from the existing advisor
+          await updateStaff(existingAdvisor.id, {
+            isClassAdvisor: false,
+            advisorFor: null,
+            accessLevel: 'staff'
+          })
+          
+          console.log(`✓ Successfully removed advisor status from ${existingAdvisor.name}`)
+          
+          // Verify the removal
+          const verifyStaff = await getStaffById(existingAdvisor.id)
+          if (verifyStaff && verifyStaff.isClassAdvisor) {
+            console.error(`ERROR: Failed to remove advisor status from ${existingAdvisor.name}`)
+          } else {
+            console.log(`✓ Verified: ${existingAdvisor.name} is no longer an advisor`)
+          }
+          
+          // Broadcast the removal
+          broadcastAdminUpdate('hierarchy-updated', {
+            staffId: existingAdvisor.id,
+            staffName: existingAdvisor.name,
+            department: department,
+            year: advisorYear,
+            isClassAdvisor: false,
+            action: 'removed'
+          })
+        } catch (removeError) {
+          console.error(`ERROR removing advisor status from ${existingAdvisor.name}:`, removeError)
+        }
+      }
+      
+      // Set advisor information (this will replace any previous advisor assignment)
+      updates.advisorFor = { department, year: advisorYear }
+      updates.accessLevel = 'class_advisor'
+      updates.isClassAdvisor = true
+      
+      console.log('Advisor assignment set:', {
+        advisorFor: updates.advisorFor,
+        accessLevel: updates.accessLevel,
+        isClassAdvisor: updates.isClassAdvisor
+      })
+      
+      // Ensure department and year are in assigned lists
+      // Start with existing values or empty arrays (make copies to avoid mutation)
+      updates.assignedDepartments = staff.assignedDepartments ? [...staff.assignedDepartments] : []
+      updates.assignedYears = staff.assignedYears ? [...staff.assignedYears] : []
+      
+      const deptYearKey = `${department}:${advisorYear}`
+      
+      // Remove old department-year assignment if changing
+      if (wasPreviouslyAdvisor && previousDeptYear && previousDeptYear !== deptYearKey) {
+        console.log(`Removing old assignment: ${previousDeptYear}`)
+        const oldDept = staff.advisorFor.department
+        // Remove old year assignment
+        const index = updates.assignedYears.indexOf(previousDeptYear)
+        if (index > -1) {
+          updates.assignedYears.splice(index, 1)
+          console.log(`Removed old year assignment: ${previousDeptYear}`)
+        }
+        // Check if old department is still needed (has other year assignments)
+        const stillHasDept = updates.assignedYears.some(y => y.startsWith(oldDept + ':'))
+        if (!stillHasDept && updates.assignedDepartments.includes(oldDept)) {
+          const deptIndex = updates.assignedDepartments.indexOf(oldDept)
+          if (deptIndex > -1) {
+            updates.assignedDepartments.splice(deptIndex, 1)
+            console.log(`Removed old department assignment: ${oldDept}`)
+          }
+        }
+      }
+      
+      // Add new department and year
+      if (!updates.assignedDepartments.includes(department)) {
+        updates.assignedDepartments.push(department)
+        console.log(`Added department: ${department}`)
+      }
+      if (!updates.assignedYears.includes(deptYearKey)) {
+        updates.assignedYears.push(deptYearKey)
+        console.log(`Added year assignment: ${deptYearKey}`)
+      }
+      
+      // If staff was previously advisor for a different year, log it for reference
+      if (wasPreviouslyAdvisor && previousDeptYear !== deptYearKey) {
+        console.log(`Staff ${staff.name} reassigned from ${previousDeptYear} to ${deptYearKey}`)
+      }
+      
+      // Remove advisorYear from updates as it's not a direct field in the database
+      delete updates.advisorYear
+    } else if (isClassAdvisor === false || (updates.isClassAdvisor === false || updates.isClassAdvisor === 'false')) {
+      // If removing advisor status, clear advisor information
+      console.log('Removing advisor status...')
+      updates.advisorFor = null
+      updates.isClassAdvisor = false
+      if (updates.accessLevel === 'class_advisor' || staff.accessLevel === 'class_advisor') {
+        updates.accessLevel = 'staff'
+      }
+      // Remove advisorYear from updates as it's not a direct field
+      delete updates.advisorYear
+    } else if (advisorYear && !isClassAdvisor) {
+      // If advisorYear is provided but isClassAdvisor is not true, remove it
+      console.log('advisorYear provided but isClassAdvisor is false, removing advisorYear')
+      delete updates.advisorYear
+    } else {
+      console.log('Advisor assignment conditions not met:', {
+        isClassAdvisor,
+        advisorYear,
+        department,
+        'isClassAdvisor type': typeof updates.isClassAdvisor,
+        'updates.isClassAdvisor': updates.isClassAdvisor
+      })
+    }
+    
+    console.log('Final updates to save:', JSON.stringify(updates, null, 2))
+    
+    // Perform the update
+    const updateResult = await updateStaff(id, updates)
+    console.log('Update result:', updateResult)
+    
+    // Small delay to ensure database write is complete
+    await new Promise(resolve => setTimeout(resolve, 100))
+    
+    // Verify the update was successful by reading from database
+    const updatedStaff = await getStaffById(id)
+    if (!updatedStaff) {
+      console.error('ERROR: Staff not found after update!')
+      return res.status(500).json({ error: 'update_verification_failed' })
+    }
+    
+    console.log('Updated staff record (from DB):', {
+      id: updatedStaff.id,
+      name: updatedStaff.name,
+      isClassAdvisor: updatedStaff.isClassAdvisor,
+      advisorFor: updatedStaff.advisorFor,
+      accessLevel: updatedStaff.accessLevel,
+      assignedDepartments: updatedStaff.assignedDepartments,
+      assignedYears: updatedStaff.assignedYears
+    })
+    
+    // Verify the advisor assignment was saved correctly
+    if (isClassAdvisor && advisorYear && department) {
+      if (!updatedStaff.isClassAdvisor || !updatedStaff.advisorFor || 
+          updatedStaff.advisorFor.department !== department || 
+          updatedStaff.advisorFor.year !== advisorYear) {
+        console.error('ERROR: Advisor assignment was not saved correctly!')
+        console.error('Expected:', { department, year: advisorYear, isClassAdvisor: true })
+        console.error('Actual:', {
+          isClassAdvisor: updatedStaff.isClassAdvisor,
+          advisorFor: updatedStaff.advisorFor
+        })
+        
+        // Try to fix it by updating again
+        console.log('Attempting to fix advisor assignment...')
+        try {
+          await updateStaff(id, {
+            isClassAdvisor: true,
+            advisorFor: { department, year: advisorYear },
+            accessLevel: 'class_advisor'
+          })
+          console.log('Fix attempt completed')
+        } catch (fixError) {
+          console.error('Failed to fix advisor assignment:', fixError)
+        }
+      } else {
+        console.log('✓ Advisor assignment verified successfully')
+        
+        // Double-check that no other staff is still an advisor for this department-year
+        const allStaffCheck = await listStaff()
+        const otherAdvisors = allStaffCheck.filter(s => 
+          s.id !== id &&
+          s.isClassAdvisor === true &&
+          s.advisorFor?.department === department &&
+          s.advisorFor?.year === advisorYear
+        )
+        
+        if (otherAdvisors.length > 0) {
+          console.warn(`WARNING: Found ${otherAdvisors.length} other advisor(s) still assigned to ${department} ${advisorYear}:`)
+          otherAdvisors.forEach(adv => {
+            console.warn(`  - ${adv.name} (${adv.id})`)
+            // Try to remove them
+            updateStaff(adv.id, {
+              isClassAdvisor: false,
+              advisorFor: null,
+              accessLevel: 'staff'
+            }).catch(err => console.error(`Failed to remove ${adv.name}:`, err))
+          })
+        } else {
+          console.log('✓ Verified: No other advisors found for this department-year')
+        }
+      }
+    }
+    
+    console.log('=== END STAFF UPDATE DEBUG ===')
     
     // Broadcast staff update to all admin panels
     broadcastAdminUpdate('staff-updated', {
@@ -2122,6 +2410,45 @@ app.put('/admin/staff/:id', async (req, res) => {
       staffName: staff.name,
       updates: updates
     })
+    
+    // Broadcast hierarchy updates for advisor assignments/removals
+    if (isClassAdvisor && advisorYear && department) {
+      // If staff was previously an advisor, also broadcast removal of old assignment
+      if (staff.isClassAdvisor && staff.advisorFor) {
+        const oldDept = staff.advisorFor.department
+        const oldYear = staff.advisorFor.year
+        if (oldDept !== department || oldYear !== advisorYear) {
+          broadcastAdminUpdate('hierarchy-updated', {
+            staffId: id,
+            staffName: staff.name,
+            department: oldDept,
+            year: oldYear,
+            isClassAdvisor: false,
+            action: 'removed'
+          })
+        }
+      }
+      
+      // Broadcast new advisor assignment
+      broadcastAdminUpdate('hierarchy-updated', {
+        staffId: id,
+        staffName: staff.name,
+        department,
+        year: advisorYear,
+        isClassAdvisor: true,
+        action: 'assigned'
+      })
+    } else if (isClassAdvisor === false && staff.isClassAdvisor && staff.advisorFor) {
+      // If advisor status is being removed, broadcast the removal
+      broadcastAdminUpdate('hierarchy-updated', {
+        staffId: id,
+        staffName: staff.name,
+        department: staff.advisorFor.department,
+        year: staff.advisorFor.year,
+        isClassAdvisor: false,
+        action: 'removed'
+      })
+    }
     
     return res.json({ success: true, message: 'Staff updated successfully' })
   } catch (error) {
@@ -2439,6 +2766,11 @@ app.get('/admin/hierarchy/structure', async (req, res) => {
     
     // Process staff assignments
     console.log('Processing staff for hierarchy:', allStaff.length, 'staff members')
+    
+    // First, collect all advisors and handle duplicates
+    // If multiple staff are advisors for the same department-year, we need to decide which one to use
+    const advisorMap = new Map() // key: "department:year", value: staff
+    
     for (const staff of allStaff) {
       if (staff.isDepartmentPlaceholder) continue
       
@@ -2447,30 +2779,57 @@ app.get('/admin/hierarchy/structure', async (req, res) => {
       // Check if staff is class advisor
       if (staff.isClassAdvisor && staff.advisorFor) {
         const { department, year } = staff.advisorFor
+        const key = `${department}:${year}`
         
-        // Ensure department exists
-        if (!hierarchy[department]) {
-          hierarchy[department] = {}
+        // If there's already an advisor for this department-year, log a warning
+        // In normal operation, this shouldn't happen as we remove old advisors
+        if (advisorMap.has(key)) {
+          const existingAdvisor = advisorMap.get(key)
+          console.warn(`WARNING: Multiple advisors found for ${key}:`)
+          console.warn(`  - Existing: ${existingAdvisor.name} (${existingAdvisor.id})`)
+          console.warn(`  - New: ${staff.name} (${staff.id})`)
+          console.warn(`  - Using: ${staff.name} (newer entry)`)
         }
         
-        // Ensure department-year combination exists
-        if (!hierarchy[department][year]) {
-          hierarchy[department][year] = {
-            classAdvisor: null,
-            staff: [],
-            students: [],
-            studentCount: 0
-          }
-        }
-        
-        // Set class advisor
-        hierarchy[department][year].classAdvisor = {
-          id: staff.id,
-          name: staff.name,
-          email: staff.email,
-          designation: staff.designation
+        // Store the advisor (newer entries will overwrite older ones)
+        advisorMap.set(key, staff)
+      }
+    }
+    
+    // Now apply the advisors to the hierarchy
+    for (const [key, staff] of advisorMap.entries()) {
+      const [department, year] = key.split(':')
+      
+      // Ensure department exists
+      if (!hierarchy[department]) {
+        hierarchy[department] = {}
+      }
+      
+      // Ensure department-year combination exists
+      if (!hierarchy[department][year]) {
+        hierarchy[department][year] = {
+          classAdvisor: null,
+          staff: [],
+          students: [],
+          studentCount: 0
         }
       }
+      
+      // Set class advisor
+      hierarchy[department][year].classAdvisor = {
+        id: staff.id,
+        name: staff.name,
+        email: staff.email,
+        designation: staff.designation
+      }
+      
+      console.log(`Set advisor for ${key}: ${staff.name}`)
+    }
+    
+    // Add staff to assigned years (non-advisor staff)
+    for (const staff of allStaff) {
+      if (staff.isDepartmentPlaceholder) continue
+      if (staff.isClassAdvisor && staff.advisorFor) continue // Already handled above
       
       // Add staff to assigned years
       if (staff.assignedYears) {
@@ -3329,16 +3688,145 @@ app.get('/face-recognition/status', async (req, res) => {
 // Proxy face recognition enrollment requests
 app.post('/face-recognition/enroll', async (req, res) => {
   try {
-    const response = await fetch(`${FACE_SERVICE_URL}/enroll`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(req.body)
+    // Check staff authentication and authorization
+    const staffEmail = req.headers['x-staff-email'] || req.query.staffEmail
+    
+    if (!staffEmail) {
+      return res.status(401).json({ 
+        error: 'authentication_required',
+        message: 'Staff authentication required to enroll faces'
+      })
+    }
+    
+    // Verify staff is an advisor
+    const staff = await getStaffByEmail(staffEmail)
+    if (!staff) {
+      console.error('Staff not found for enrollment:', staffEmail)
+      return res.status(404).json({ 
+        error: 'staff_not_found',
+        message: 'Staff member not found'
+      })
+    }
+    
+    console.log('Staff check for enrollment:', {
+      email: staffEmail,
+      name: staff.name,
+      isClassAdvisor: staff.isClassAdvisor,
+      advisorFor: staff.advisorFor
     })
     
-    const result = await response.json()
+    if (!staff.isClassAdvisor || !staff.advisorFor) {
+      console.error('Access denied - Staff is not a class advisor:', {
+        email: staffEmail,
+        isClassAdvisor: staff.isClassAdvisor,
+        advisorFor: staff.advisorFor
+      })
+      return res.status(403).json({ 
+        error: 'access_denied',
+        message: 'Only class advisors can enroll student faces. Please ensure you are assigned as an advisor for a department and year.',
+        details: `Staff ${staff.name} is not currently assigned as a class advisor.`
+      })
+    }
     
-    if (!response.ok) {
-      return res.status(response.status).json(result)
+    console.log('Sending enrollment request to face service:', {
+      url: `${FACE_SERVICE_URL}/enroll`,
+      student_id: req.body.student_id,
+      name: req.body.name,
+      department: req.body.department,
+      images_count: req.body.images?.length || 0
+    })
+    
+    let response
+    let result
+    
+    try {
+      // Create AbortController for timeout
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 30000) // 30 second timeout
+      
+      try {
+        response = await fetch(`${FACE_SERVICE_URL}/enroll`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(req.body),
+          signal: controller.signal
+        })
+        clearTimeout(timeoutId)
+      } catch (fetchErr) {
+        clearTimeout(timeoutId)
+        if (fetchErr.name === 'AbortError') {
+          throw new Error('Request timeout: Face recognition service did not respond within 30 seconds')
+        }
+        throw fetchErr
+      }
+      
+      console.log('Face service response status:', response.status)
+      
+      const text = await response.text()
+      try {
+        result = text ? JSON.parse(text) : {}
+      } catch (parseError) {
+        console.error('Failed to parse face service response:', parseError)
+        console.error('Response text:', text.substring(0, 500))
+        return res.status(500).json({
+          error: 'service_error',
+          message: 'Face recognition service returned invalid response',
+          details: 'The service may not be running correctly'
+        })
+      }
+      
+      console.log('Face service response:', result)
+      
+      if (!response.ok) {
+        console.error('Face service returned error:', result)
+        // Pass through the error from face service, preserving error code and details
+        return res.status(response.status).json({
+          error: result.error || 'service_error',
+          message: result.message || 'Face recognition service error',
+          details: result.details || result.message,
+          ...result // Include all other fields from the response
+        })
+      }
+    } catch (fetchError) {
+      console.error('Error calling face recognition service:', fetchError)
+      console.error('Fetch error name:', fetchError.name)
+      console.error('Fetch error message:', fetchError.message)
+      console.error('Fetch error code:', fetchError.code)
+      
+      // Check for ECONNREFUSED in error cause (AggregateError)
+      const errorCode = fetchError.code || fetchError.cause?.code || 
+                       (fetchError.cause?.errors?.[0]?.code) || 
+                       (fetchError.errors?.[0]?.code)
+      const errorMessage = fetchError.message || fetchError.cause?.message || ''
+      
+      console.error('Extracted error code:', errorCode)
+      console.error('Extracted error message:', errorMessage)
+      
+      // Handle abort/timeout
+      if (fetchError.name === 'AbortError' || errorMessage.includes('timeout')) {
+        return res.status(504).json({
+          error: 'service_timeout',
+          message: 'Face recognition service did not respond in time.',
+          details: 'The service may be overloaded or not responding. Please try again.'
+        })
+      }
+      
+      // Handle connection errors (including AggregateError with ECONNREFUSED)
+      if (errorCode === 'ECONNREFUSED' || 
+          errorMessage.includes('ECONNREFUSED') ||
+          errorMessage.includes('fetch failed') || 
+          errorMessage.includes('ENOTFOUND') ||
+          errorMessage.includes('ECONNRESET') ||
+          fetchError.name === 'AggregateError') {
+        return res.status(503).json({
+          error: 'service_unavailable',
+          message: 'Face recognition service is not running. Please start the service on port 5001.',
+          details: `Cannot connect to ${FACE_SERVICE_URL}. Make sure the Python face recognition service is running. Run: python face_recognition_service.py`
+        })
+      }
+      
+      // Re-throw to be caught by outer catch for other errors
+      throw fetchError
     }
     
     // Broadcast enrollment update to admin
@@ -3346,6 +3834,7 @@ app.post('/face-recognition/enroll', async (req, res) => {
       studentId: req.body.student_id,
       name: req.body.name,
       imagesProcessed: result.images_processed,
+      enrolledBy: staffEmail,
       timestamp: Date.now()
     })
     
@@ -3353,9 +3842,55 @@ app.post('/face-recognition/enroll', async (req, res) => {
     
   } catch (error) {
     console.error('Face recognition enrollment proxy error:', error)
+    console.error('Error details:', error.message, error.code, error.stack)
+    
+    // Check for ECONNREFUSED in error cause (AggregateError)
+    const errorCode = error.code || error.cause?.code || 
+                     (error.cause?.errors?.[0]?.code) || 
+                     (error.errors?.[0]?.code)
+    const errorMessage = error.message || error.cause?.message || ''
+    
+    console.error('Outer catch - Extracted error code:', errorCode)
+    console.error('Outer catch - Extracted error message:', errorMessage)
+    
+    // Check if it's a connection error
+    if (errorCode === 'ECONNREFUSED' || 
+        errorMessage.includes('ECONNREFUSED') || 
+        errorMessage.includes('fetch failed') || 
+        errorMessage.includes('ENOTFOUND') ||
+        error.name === 'AggregateError') {
+      return res.status(503).json({ 
+        error: 'service_unavailable',
+        message: 'Face recognition service is not running. Please start the service on port 5001.',
+        details: `Connection refused to ${FACE_SERVICE_URL}. Make sure the Python face recognition service is running. Run: python face_recognition_service.py`
+      })
+    }
+    
+    // Check if it's a timeout error
+    if (error.message.includes('timeout') || error.code === 'ETIMEDOUT') {
+      return res.status(504).json({ 
+        error: 'service_timeout',
+        message: 'Face recognition service did not respond in time.',
+        details: 'The service may be overloaded or not responding.'
+      })
+    }
+    
+    // Check if it's a JSON parse error (service might be returning HTML error page)
+    if (error.message.includes('JSON') || error.message.includes('Unexpected token') || 
+        error.message.includes('invalid json')) {
+      return res.status(503).json({ 
+        error: 'service_error',
+        message: 'Face recognition service returned invalid response.',
+        details: 'The service may not be running correctly or may have crashed.'
+      })
+    }
+    
     return res.status(500).json({ 
       error: 'internal_error',
-      message: 'Failed to process face recognition enrollment'
+      message: 'Failed to process face recognition enrollment',
+      details: error.message || 'Unknown error occurred',
+      errorType: error.name || 'Error',
+      errorCode: error.code || 'UNKNOWN'
     })
   }
 })

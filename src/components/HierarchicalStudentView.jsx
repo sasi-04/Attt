@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react'
 import { adminApi } from './api.js'
 import * as XLSX from 'xlsx'
 import { useDepartmentUpdates, useStudentUpdates } from '../hooks/useWebSocket.js'
+import wsManager from '../utils/websocket.js'
 
 export default function HierarchicalStudentView() {
   const [viewLevel, setViewLevel] = useState('departments') // 'departments', 'years', 'students'
@@ -416,9 +417,44 @@ export default function HierarchicalStudentView() {
     }
   }, [selectedDept, selectedYear, viewLevel])
 
+  // Handle hierarchy updates (when advisors are assigned/changed)
+  const handleHierarchyUpdate = useCallback((update) => {
+    console.log('Hierarchy update received:', update)
+    // Refresh hierarchy data to show updated advisors
+    if (selectedDept) {
+      loadHierarchyData()
+    }
+  }, [selectedDept])
+
   // Subscribe to WebSocket updates
   useDepartmentUpdates(handleDepartmentUpdate)
   useStudentUpdates(handleStudentUpdate)
+  
+  // Listen for hierarchy-updated events from WebSocket or custom events
+  useEffect(() => {
+    const handleCustomHierarchyUpdate = () => {
+      console.log('Custom hierarchy update event received')
+      if (selectedDept) {
+        loadHierarchyData()
+      }
+    }
+    
+    // Listen for custom events
+    window.addEventListener('hierarchy-updated', handleCustomHierarchyUpdate)
+    
+    // Also listen via WebSocket if available
+    let unsubscribe = null
+    if (wsManager) {
+      unsubscribe = wsManager.subscribe('hierarchy-updated', handleHierarchyUpdate)
+    }
+    
+    return () => {
+      window.removeEventListener('hierarchy-updated', handleCustomHierarchyUpdate)
+      if (unsubscribe) {
+        unsubscribe()
+      }
+    }
+  }, [selectedDept, handleHierarchyUpdate])
 
   const loadDepartments = async () => {
     try {

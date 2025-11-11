@@ -2,15 +2,37 @@ export const API_BASE = import.meta.env.VITE_API_BASE || '/api'
 
 export async function apiPost(path, body) {
   try {
+    // Get staff email from localStorage for authentication
+    const user = JSON.parse(localStorage.getItem('ams_user') || localStorage.getItem('user') || '{}')
+    const headers = { 'Content-Type': 'application/json' }
+    
+    // Add staff email to headers if available
+    if (user.email) {
+      headers['x-staff-email'] = user.email
+    }
+    
     const res = await fetch(`${API_BASE}${path}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: headers,
       body: JSON.stringify(body || {})
     })
     const text = await res.text()
     let data = {}
     try { data = text ? JSON.parse(text) : {} } catch { data = { raw: text } }
-    if (!res.ok) throw Object.assign(new Error(data.message || data.error || 'request_failed'), { code: data.error, status: res.status, raw: data.raw })
+    if (!res.ok) {
+      const error = Object.assign(
+        new Error(data.message || data.error || 'request_failed'), 
+        { 
+          code: data.error, 
+          status: res.status, 
+          details: data.details,
+          errorType: data.errorType,
+          errorCode: data.errorCode,
+          raw: data 
+        }
+      )
+      throw error
+    }
     return data
   } catch (err) {
     if (err.name === 'TypeError') {
@@ -22,7 +44,16 @@ export async function apiPost(path, body) {
 }
 
 export async function apiGet(path) {
-  const res = await fetch(`${API_BASE}${path}`)
+  // Get staff email from localStorage for authentication
+  const user = JSON.parse(localStorage.getItem('ams_user') || localStorage.getItem('user') || '{}')
+  const headers = {}
+  
+  // Add staff email to headers if available
+  if (user.email) {
+    headers['x-staff-email'] = user.email
+  }
+  
+  const res = await fetch(`${API_BASE}${path}`, { headers })
   const data = await res.json().catch(() => ({}))
   if (!res.ok) throw Object.assign(new Error(data.error || 'request_failed'), { code: data.error })
   return data
@@ -30,9 +61,18 @@ export async function apiGet(path) {
 
 export async function apiPut(path, body) {
   try {
+    // Get staff email from localStorage for authentication
+    const user = JSON.parse(localStorage.getItem('ams_user') || localStorage.getItem('user') || '{}')
+    const headers = { 'Content-Type': 'application/json' }
+    
+    // Add staff email to headers if available
+    if (user.email) {
+      headers['x-staff-email'] = user.email
+    }
+    
     const res = await fetch(`${API_BASE}${path}`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      headers: headers,
       body: JSON.stringify(body || {})
     })
     const text = await res.text()

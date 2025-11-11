@@ -1,0 +1,22 @@
+[
+  {
+    "student_id": "NaN",
+    "roll_no": "NaN",
+    "name": "LOGESHWARAN",
+    "department": "M.Tech",
+    "email": "thillaiarasu0216@gmail.com",
+    "enrolled_at": "2025-11-10T15:52:38.146521",
+    "images_count": 3,
+    "faces_detected": 3
+  },
+  {
+    "student_id": "730422553015",
+    "roll_no": "730422553015",
+    "name": "LOGESHWARAN",
+    "department": "M.Tech",
+    "email": "thillaiarasu0216@gmail.com",
+    "enrolled_at": "2025-11-10T15:58:13.199783",
+    "images_count": 3,
+    "faces_detected": 3
+  }
+]
