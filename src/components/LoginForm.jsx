@@ -47,11 +47,11 @@ const LoginForm = () => {
           <h2 className="text-lg font-semibold mb-4">Sign In</h2>
           <p className="text-sm text-gray-500 mb-4">Enter your credentials to access the attendance monitoring system</p>
           <div className="mb-4">
-            <label className="block text-sm font-medium mb-1">Email</label>
+            <label className="block text-sm font-medium mb-1">User Name</label>
             <input
               type="email"
               className="w-full px-4 py-2 border rounded bg-gray-100"
-              placeholder="Enter your email"
+              placeholder="Enter your user name"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               required

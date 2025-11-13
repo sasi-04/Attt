@@ -161,13 +161,37 @@ export default function AddStudentModal({ onClose, onStudentAdded }) {
         // We'll call it when the user clicks "Done" on the credentials view
         // This allows the credentials to be displayed first
       } else {
-        const errorMsg = response.error || response.message || 'Failed to create student'
+        // Handle error response
+        let errorMsg = response.message || response.error || 'Failed to create student'
+        
+        // Map error codes to user-friendly messages
+        if (response.error === 'invalid_student_name') {
+          errorMsg = 'Example or demo student names are not allowed. Please use a real student name.'
+        } else if (response.error === 'student_exists') {
+          errorMsg = 'A student with this registration number already exists.'
+        } else if (response.error === 'missing_required_fields') {
+          errorMsg = 'Name, RegNo, and StudentId are required fields.'
+        }
+        
         setError(errorMsg)
         console.error('Student creation failed:', errorMsg)
       }
     } catch (error) {
       console.error('Error creating student:', error)
-      setError(error.message || 'Failed to create student. Please try again.')
+      let errorMsg = 'Failed to create student. Please try again.'
+      
+      // Handle error object with code property
+      if (error.code === 'invalid_student_name') {
+        errorMsg = 'Example or demo student names are not allowed. Please use a real student name.'
+      } else if (error.code === 'student_exists') {
+        errorMsg = 'A student with this registration number already exists.'
+      } else if (error.code === 'missing_required_fields') {
+        errorMsg = 'Name, RegNo, and StudentId are required fields.'
+      } else if (error.message) {
+        errorMsg = error.message
+      }
+      
+      setError(errorMsg)
     } finally {
       setIsSubmitting(false)
     }

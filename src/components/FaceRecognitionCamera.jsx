@@ -7,7 +7,8 @@ export default function FaceRecognitionCamera({
   onRecognitionError,
   onClose,
   department = "Computer Science",
-  year = "4th Year"
+  year = "4th Year",
+  studentId = ""
 }) {
   const videoRef = useRef(null)
   const canvasRef = useRef(null)
@@ -144,7 +145,11 @@ export default function FaceRecognitionCamera({
         },
         body: JSON.stringify({
           image: base64Data,
-          session_id: sessionId
+          session_id: sessionId,
+          // Hint for simple service to validate enrollment for this student id
+          expected_student_id: (studentId || '').toString().trim(),
+          department,
+          year
         })
       })
 

@@ -37,12 +37,12 @@ export default function StudentLoginForm(){
         <div className="text-center mb-6">
           <div className="text-4xl mb-2">🎓</div>
           <h1 className="text-2xl font-bold">Student Sign In</h1>
-          <p className="text-gray-600">Use your Reg.No as username</p>
+          <p className="text-gray-600">Use your user name to sign in</p>
         </div>
         <form onSubmit={onSubmit}>
           <h2 className="text-lg font-semibold mb-4">Sign In</h2>
           <div className="mb-4">
-            <label className="block text-sm font-medium mb-1">Reg.No</label>
+            <label className="block text-sm font-medium mb-1">User Name</label>
             <input type="text" value={regNo} onChange={e=>setRegNo(e.target.value)} required className="w-full px-4 py-2 border rounded bg-gray-100" />
           </div>
           <div className="mb-4">

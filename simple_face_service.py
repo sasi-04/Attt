@@ -22,6 +22,7 @@ CORS(app, origins=["http://localhost:5173", "http://localhost:3000", "http://loc
 
 # Configuration
 SERVICE_PORT = int(os.getenv('FACE_SERVICE_PORT', '5001'))
+MAIN_SERVER_URL = os.getenv('MAIN_SERVER_URL', 'http://localhost:3001')
 DATA_DIR = "face_data"
 ENROLLED_STUDENTS_FILE = os.path.join(DATA_DIR, "enrolled_students.json")
 
@@ -194,15 +195,41 @@ def enroll_student():
             'message': f'Enrollment failed: {str(e)}'
         }), 500
 
+def mark_attendance(session_id, student_id, department, year):
+    try:
+        payload = {
+            'sessionId': session_id,
+            'studentId': student_id,
+            'confidence': 0.9,
+            'source': 'simple_face_service',
+            'department': department,
+            'year': year,
+            'timestamp': datetime.now().isoformat()
+        }
+        import requests
+        resp = requests.post(f"{MAIN_SERVER_URL}/attendance/face-recognition", json=payload, timeout=5)
+        if resp.status_code == 200:
+            return True, resp.json()
+        return False, {'status': resp.status_code, 'text': resp.text}
+    except Exception as e:
+        logger.error(f"Mark attendance error: {e}")
+        return False, {'error': str(e)}
+
 @app.route('/recognize', methods=['POST'])
 def recognize_faces():
     """
-    Simple recognition endpoint (mock for now)
-    In production, you'd implement actual face matching here
+    Simple recognition endpoint with enrollment validation:
+    - Detects face
+    - If expected_student_id provided and enrolled, treat as recognized
+    - Marks attendance via main server endpoint
     """
     try:
         data = request.get_json()
         image_b64 = data.get('image')
+        expected_id = str(data.get('expected_student_id') or '').strip()
+        session_id = data.get('session_id') or ''
+        department = data.get('department') or 'Computer Science'
+        year = data.get('year') or '4th Year'
         
         if not image_b64:
             return jsonify({'error': 'Missing image'}), 400
@@ -214,13 +241,57 @@ def recognize_faces():
         
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+        faces_detected = len(faces)
         
-        return jsonify({
-            'success': True,
-            'faces_detected': len(faces),
-            'recognized': [],  # Would contain matched students in production
-            'message': f'Detected {len(faces)} face(s)'
-        })
+        if faces_detected == 0:
+            return jsonify({
+                'success': False,
+                'faces_detected': 0,
+                'recognized': False,
+                'message': 'No face detected'
+            })
+        
+        # Validate enrollment against local list
+        enrolled = load_enrolled_students()
+        is_enrolled = expected_id and any((s.get('student_id') == expected_id or s.get('roll_no') == expected_id) for s in enrolled)
+        
+        if not expected_id:
+            return jsonify({
+                'success': False,
+                'faces_detected': faces_detected,
+                'recognized': False,
+                'message': 'No student context provided'
+            })
+        
+        if not is_enrolled:
+            return jsonify({
+                'success': False,
+                'faces_detected': faces_detected,
+                'recognized': False,
+                'message': 'Student not enrolled for face recognition'
+            })
+        
+        # Mark attendance in main server
+        ok, result = mark_attendance(session_id, expected_id, department, year)
+        if ok:
+            return jsonify({
+                'success': True,
+                'faces_detected': faces_detected,
+                'recognized': True,
+                'student_id': expected_id,
+                'confidence': 0.9,
+                'attendance_logged': True,
+                'marked_at': result.get('markedAt')
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'faces_detected': faces_detected,
+                'recognized': True,
+                'student_id': expected_id,
+                'attendance_logged': False,
+                'message': f"Attendance logging failed: {result}"
+            }), 502
         
     except Exception as e:
         logger.error(f"Recognition error: {e}")

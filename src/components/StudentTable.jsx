@@ -1,5 +1,5 @@
 import React, { useMemo, useState, useEffect } from 'react'
-import { apiGet } from './api.js'
+import { apiGet, apiDelete } from './api.js'
 import FaceEnrollmentModal from './FaceEnrollmentModal.jsx'
 import AddStudentModal from './AddStudentModal.jsx'
 import { getSocket } from './ws.js'

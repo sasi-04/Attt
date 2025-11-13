@@ -44,7 +44,7 @@ export default function StaffLoginForm(){
         <form onSubmit={onSubmit}>
           <h2 className="text-lg font-semibold mb-4">Sign In</h2>
           <div className="mb-4">
-            <label className="block text-sm font-medium mb-1">Email</label>
+            <label className="block text-sm font-medium mb-1">User Name</label>
             <input type="text" value={email} onChange={(e)=>setEmail(e.target.value)} required className="w-full px-4 py-2 border rounded bg-gray-100" />
           </div>
           <div className="mb-4">

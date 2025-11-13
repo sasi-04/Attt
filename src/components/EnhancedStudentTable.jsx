@@ -51,7 +51,21 @@ export default function EnhancedStudentTable(){
       // Fetch students with staff email for filtering
       const url = staffEmail ? `/students/list?staffEmail=${encodeURIComponent(staffEmail)}` : '/students/list'
       const response = await apiGet(url)
-      const students = response.students.map(s => ({
+      
+      // Helper to check if student is example
+      const isExampleStudent = (s) => {
+        if (!s || !s.name) return false
+        const name = (s.name || '').trim()
+        return /\bStudent\s+\d+\b/i.test(name) || 
+               /Demo Student/i.test(name) || 
+               /Example Student/i.test(name) ||
+               /Test Student/i.test(name) ||
+               /^(CSE|ECE|MECH|CIVIL|M\.Tech|Mtech|MTECH)\s+Student\s+\d+$/i.test(name)
+      }
+      
+      const students = response.students
+        .filter(s => !isExampleStudent(s)) // Filter out example students
+        .map(s => ({
         name: s.name,
         roll: s.regNo,
         dept: s.department || 'M.Tech',
@@ -82,7 +96,21 @@ export default function EnhancedStudentTable(){
       if (selectedYear !== 'All') params.append('year', selectedYear)
       
       const response = await apiGet(`/admin/students/by-department?${params.toString()}`)
-      const students = response.students.map(s => ({
+      
+      // Helper to check if student is example
+      const isExampleStudent = (s) => {
+        if (!s || !s.name) return false
+        const name = (s.name || '').trim()
+        return /\bStudent\s+\d+\b/i.test(name) || 
+               /Demo Student/i.test(name) || 
+               /Example Student/i.test(name) ||
+               /Test Student/i.test(name) ||
+               /^(CSE|ECE|MECH|CIVIL|M\.Tech|Mtech|MTECH)\s+Student\s+\d+$/i.test(name)
+      }
+      
+      const students = response.students
+        .filter(s => !isExampleStudent(s)) // Filter out example students
+        .map(s => ({
         name: s.name,
         roll: s.regNo,
         dept: s.department || 'M.Tech',
@@ -113,12 +141,33 @@ export default function EnhancedStudentTable(){
 
   const handleDeleteStudent = async () => {
     try {
-      await adminApi.deleteStudent(selectedStudent.roll)
-      setMessage('Student deleted successfully!')
+      const regNoToDelete = selectedStudent.roll
+      
+      // Optimistically remove from UI
+      setData(prev => prev.filter(s => s.roll !== regNoToDelete))
       setShowDeleteModal(false)
-      loadStudents()
+      setMessage('Student deleted successfully!')
+      
+      // Delete in background
+      await adminApi.deleteStudent(regNoToDelete)
+      
+      // Reload to ensure consistency (but UI already updated)
+      if (viewMode === 'department') {
+        loadStudentsByDepartment()
+      } else {
+        loadStudents()
+      }
+      
+      setTimeout(() => setMessage(''), 3000)
     } catch (error) {
+      // Revert optimistic update on error
+      if (viewMode === 'department') {
+        loadStudentsByDepartment()
+      } else {
+        loadStudents()
+      }
       setMessage('Failed to delete student')
+      setTimeout(() => setMessage(''), 3000)
     }
   }
 

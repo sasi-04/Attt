@@ -148,6 +148,7 @@ export default function StudentScanAttendance(){
           onClose={handleCloseFaceRecognition}
           department={user?.department || "Computer Science"}
           year={user?.year || "4th Year"}
+          studentId={(user?.regNo || user?.studentId || user?.roll || '').toString()}
         />
       )}
       {/* Mode Selection Buttons */}

@@ -28,6 +28,7 @@ export default function HierarchicalStudentView() {
   const [excelFile, setExcelFile] = useState(null)
   const [excelPreview, setExcelPreview] = useState([])
   const [hierarchyData, setHierarchyData] = useState({})
+  const [isUploading, setIsUploading] = useState(false)
   const [newYear, setNewYear] = useState('')
   const [newStudent, setNewStudent] = useState({
     name: '',
@@ -54,28 +55,68 @@ export default function HierarchicalStudentView() {
       setAddStudentTab('manual')
       setExcelFile(null)
       setExcelPreview([])
+      setIsUploading(false)
+      // Reset file input by finding it and clearing its value
+      const fileInput = document.querySelector('input[type="file"][accept*="xlsx"]')
+      if (fileInput) {
+        fileInput.value = ''
+      }
     }
   }, [showAddStudentModal])
 
   // Handle Excel file selection
   const handleExcelFileChange = (e) => {
     const file = e.target.files[0]
-    if (file && (file.type === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' || file.type === 'application/vnd.ms-excel' || file.name.endsWith('.xlsx') || file.name.endsWith('.xls'))) {
+    console.log('File selected:', file)
+    console.log('File name:', file?.name)
+    console.log('File type:', file?.type)
+    console.log('File size:', file?.size)
+    
+    if (!file) {
+      setMessage('No file selected')
+      setTimeout(() => setMessage(''), 3000)
+      return
+    }
+    
+    // More lenient validation - check file extension first, then MIME type
+    const fileName = file.name.toLowerCase()
+    const isValidExtension = fileName.endsWith('.xlsx') || fileName.endsWith('.xls') || fileName.endsWith('.csv')
+    const isValidMimeType = file.type === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' || 
+                             file.type === 'application/vnd.ms-excel' || 
+                             file.type === 'text/csv' ||
+                             file.type === 'application/csv' ||
+                             file.type === ''
+    
+    if (isValidExtension || isValidMimeType) {
+      console.log('File validation passed, parsing...')
       setExcelFile(file)
       parseExcel(file)
     } else {
-      setMessage('Please select a valid Excel file (.xlsx or .xls)')
-      setTimeout(() => setMessage(''), 3000)
+      console.error('Invalid file type:', file.type, 'File name:', file.name)
+      setMessage(`Please select a valid Excel file (.xlsx, .xls, or .csv). File type: ${file.type || 'unknown'}`)
+      setTimeout(() => setMessage(''), 5000)
     }
   }
 
   // Parse Excel file
   const parseExcel = (file) => {
+    console.log('Starting Excel parse for file:', file.name)
     const reader = new FileReader()
+    
+    // Add error handler
+    reader.onerror = (error) => {
+      console.error('FileReader error:', error)
+      setMessage(`❌ Error reading file: ${error.message || 'Unknown error'}`)
+      setTimeout(() => setMessage(''), 5000)
+    }
+    
     reader.onload = (e) => {
       try {
+        console.log('File read successfully, size:', e.target.result.byteLength)
         const data = new Uint8Array(e.target.result)
+        console.log('Creating workbook from data...')
         const workbook = XLSX.read(data, { type: 'array' })
+        console.log('Workbook created, sheet names:', workbook.SheetNames)
         
         // Get the first worksheet
         const firstSheetName = workbook.SheetNames[0]
@@ -228,13 +269,20 @@ export default function HierarchicalStudentView() {
         
       } catch (error) {
         console.error('Excel parsing error:', error)
-        setMessage(`❌ Error parsing Excel file: ${error.message}`)
+        console.error('Error stack:', error.stack)
+        setMessage(`❌ Error parsing Excel file: ${error.message || 'Unknown error'}. Please check the file format.`)
         setTimeout(() => setMessage(''), 5000)
       }
     }
     
     // Read as ArrayBuffer for binary Excel files
+    try {
     reader.readAsArrayBuffer(file)
+    } catch (error) {
+      console.error('Error starting file read:', error)
+      setMessage(`❌ Error reading file: ${error.message || 'Unknown error'}`)
+      setTimeout(() => setMessage(''), 5000)
+    }
   }
 
   // Download Excel template
@@ -260,6 +308,19 @@ export default function HierarchicalStudentView() {
       return
     }
     
+    // Validate department and year are selected
+    if (!selectedDept || !selectedDept.name) {
+      setMessage('❌ Please select a department first')
+      setTimeout(() => setMessage(''), 3000)
+      return
+    }
+    
+    if (!selectedYear) {
+      setMessage('❌ Please select a year first')
+      setTimeout(() => setMessage(''), 3000)
+      return
+    }
+    
     console.log('=== STARTING BULK UPLOAD ===')
     console.log('Selected Department:', selectedDept)
     console.log('Selected Year:', selectedYear)
@@ -274,6 +335,9 @@ export default function HierarchicalStudentView() {
     
     console.log('Excel preview data structure:', excelPreview[0])
     console.log('Total students to process:', excelPreview.length)
+    
+    setIsUploading(true)
+    setMessage('⏳ Uploading students... Please wait.')
     
     try {
       let successCount = 0
@@ -312,12 +376,15 @@ export default function HierarchicalStudentView() {
             console.log(`Generated unique regNo: ${regNo} for studentId: ${studentId}`)
           }
           
+          // Extract name with case-insensitive fallback
+          const studentName = student.name || student.Name || student.NAME || ''
+          
           const studentData = {
-            name: student.name,
-            regNo: regNo,
-            studentId: studentId,
-            email: student.email || '',
-            password: student.password || 'student123',
+            name: String(studentName).trim(),
+            regNo: String(regNo || '').trim(),
+            studentId: String(studentId || '').trim(),
+            email: (student.email || '').trim(),
+            password: (student.password || 'student123').trim(),
             department: selectedDept.name,
             year: selectedYear
           }
@@ -326,7 +393,11 @@ export default function HierarchicalStudentView() {
           
           // Validate required fields
           if (!studentData.name || !studentData.regNo || !studentData.studentId) {
-            throw new Error(`Missing required fields: name=${studentData.name}, regNo=${studentData.regNo}, studentId=${studentData.studentId}`)
+            const missingFields = []
+            if (!studentData.name) missingFields.push('name')
+            if (!studentData.regNo) missingFields.push('regNo')
+            if (!studentData.studentId) missingFields.push('studentId')
+            throw new Error(`Missing required fields: ${missingFields.join(', ')}. Student data: ${JSON.stringify(student)}`)
           }
           
           const result = await adminApi.createStudent(studentData)
@@ -334,13 +405,36 @@ export default function HierarchicalStudentView() {
           successCount++
         } catch (error) {
           console.error(`❌ Failed to add student ${student.name}:`, error)
-          let errorMsg = error.message || error.toString()
-          if (error.message && error.message.includes('student_exists')) {
-            errorMsg = 'Student with this registration number already exists'
-          } else if (error.message && error.message.includes('missing_required_fields')) {
-            errorMsg = 'Missing required fields (name, regNo, or studentId)'
+          console.error('Error details:', {
+            message: error.message,
+            code: error.code,
+            status: error.status,
+            raw: error.raw
+          })
+          
+          let errorMsg = 'Unknown error'
+          
+          // Handle API errors (from apiPost function)
+          if (error.code) {
+            // This is an API error from apiPost
+            if (error.code === 'student_exists') {
+              errorMsg = `Student with RegNo ${regNo} already exists`
+            } else if (error.code === 'missing_required_fields') {
+              errorMsg = error.message || 'Missing required fields (name, regNo, or studentId)'
+            } else if (error.code === 'invalid_student_name') {
+              errorMsg = error.message || 'Invalid student name (example/demo names not allowed)'
+            } else if (error.code === 'network_error') {
+              errorMsg = 'Network error - please check your connection'
+            } else {
+              errorMsg = error.message || error.code || `HTTP ${error.status || 'Unknown'} error`
+            }
+          } else if (error.message) {
+            errorMsg = error.message
+          } else {
+            errorMsg = error.toString()
           }
-          errors.push(`${student.name} (RegNo: ${regNo || 'unknown'}): ${errorMsg}`)
+          
+          errors.push(`${student.name || 'Unknown'} (RegNo: ${regNo || 'unknown'}): ${errorMsg}`)
           errorCount++
         }
       }
@@ -351,9 +445,22 @@ export default function HierarchicalStudentView() {
         console.log('Errors:', errors)
       }
       
-      let message = `Successfully added ${successCount} students.`
+      let message = ''
+      if (successCount > 0) {
+        message = `✅ Successfully added ${successCount} student${successCount !== 1 ? 's' : ''}.`
+      }
       if (errorCount > 0) {
-        message += ` ${errorCount} failed. Check console for details.`
+        if (message) message += ' '
+        message += `❌ ${errorCount} student${errorCount !== 1 ? 's' : ''} failed to upload.`
+        if (errors.length > 0 && errors.length <= 5) {
+          // Show first few errors in message
+          message += '\n\nErrors:\n' + errors.slice(0, 5).join('\n')
+        } else if (errors.length > 5) {
+          message += `\n\nFirst 5 errors:\n${errors.slice(0, 5).join('\n')}\n... and ${errors.length - 5} more (check console)`
+        }
+      }
+      if (successCount === 0 && errorCount > 0) {
+        message = `❌ Failed to upload all ${errorCount} student${errorCount !== 1 ? 's' : ''}.\n\n${errors.slice(0, 10).join('\n')}${errors.length > 10 ? `\n... and ${errors.length - 10} more errors (check console)` : ''}`
       }
       setMessage(message)
       
@@ -373,14 +480,16 @@ export default function HierarchicalStudentView() {
         loadStudents(selectedDept.name, selectedYear)
       }
       
-      setTimeout(() => setMessage(''), 5000)
+      setTimeout(() => setMessage(''), 10000)
     } catch (error) {
       console.error('=== BULK UPLOAD ERROR ===')
       console.error('Error details:', error)
       console.error('Error message:', error.message)
       console.error('Error stack:', error.stack)
-      setMessage(`Failed to upload students: ${error.message || error}`)
-      setTimeout(() => setMessage(''), 5000)
+      setMessage(`❌ Failed to upload students: ${error.message || error}. Please check the browser console for details.`)
+      setTimeout(() => setMessage(''), 10000)
+    } finally {
+      setIsUploading(false)
     }
   }
 
@@ -491,6 +600,19 @@ export default function HierarchicalStudentView() {
     }
   }
 
+  // Helper function to check if student is an example
+  const isExampleStudent = (student) => {
+    if (student.isYearPlaceholder || student.isPlaceholder || student.isDepartmentPlaceholder) {
+      return false
+    }
+    const name = (student.name || '').trim()
+    return /\bStudent\s+\d+\b/i.test(name) || 
+           /Demo Student/i.test(name) || 
+           /Example Student/i.test(name) ||
+           /Test Student/i.test(name) ||
+           /^(CSE|ECE|MECH|CIVIL|M\.Tech|Mtech|MTECH)\s+Student\s+\d+$/i.test(name)
+  }
+
   const loadStudents = async (dept, year) => {
     try {
       setLoading(true)
@@ -499,7 +621,9 @@ export default function HierarchicalStudentView() {
       if (year) params.append('year', year)
       
       const response = await adminApi.getStudentsByDepartment(dept, year)
-      const mappedStudents = response.students.map(s => ({
+      const mappedStudents = response.students
+        .filter(s => !isExampleStudent(s)) // Filter out example students
+        .map(s => ({
         name: s.name,
         roll: s.regNo,
         dept: s.department || 'M.Tech',
@@ -555,12 +679,25 @@ export default function HierarchicalStudentView() {
 
   const handleDeleteStudent = async () => {
     try {
-      await adminApi.deleteStudent(selectedStudent.roll)
-      setMessage('Student deleted successfully!')
+      const regNoToDelete = selectedStudent.roll
+      
+      // Optimistically remove from UI
+      setStudents(prev => prev.filter(s => s.roll !== regNoToDelete))
       setShowDeleteModal(false)
+      setMessage('Student deleted successfully!')
+      
+      // Delete in background
+      await adminApi.deleteStudent(regNoToDelete)
+      
+      // Reload to ensure consistency (but UI already updated)
       loadStudents(selectedDept.name, selectedYear)
+      
+      setTimeout(() => setMessage(''), 3000)
     } catch (error) {
+      // Revert optimistic update on error
+      loadStudents(selectedDept.name, selectedYear)
       setMessage('Failed to delete student')
+      setTimeout(() => setMessage(''), 3000)
     }
   }
 
@@ -618,19 +755,7 @@ export default function HierarchicalStudentView() {
         department: selectedDept.name,
         year: selectedYear
       }
-      await adminApi.createStudent(studentData)
-      
-      // Remove year placeholder if it exists
-      const currentStudents = await adminApi.getStudentsByDepartment(selectedDept.name, selectedYear)
-      const yearPlaceholder = currentStudents.students.find(s => s.isYearPlaceholder)
-      if (yearPlaceholder) {
-        try {
-          await adminApi.deleteStudent(yearPlaceholder.regNo)
-          console.log('Year placeholder removed:', yearPlaceholder.regNo)
-        } catch (placeholderError) {
-          console.error('Failed to remove year placeholder:', placeholderError)
-        }
-      }
+      const response = await adminApi.createStudent(studentData)
       
       setMessage('Student added successfully!')
       setShowAddStudentModal(false)
@@ -641,12 +766,53 @@ export default function HierarchicalStudentView() {
         email: '',
         password: ''
       })
+      
+      // Optimistically update the students list
+      const newStudentObj = {
+        ...response.student,
+        roll: response.student.regNo,
+        attendance: 0,
+        lastSeen: 'Never',
+        attendedSessions: 0,
+        missedSessions: 0,
+        totalSessions: 0,
+        status: 'active'
+      }
+      
+      // Check if we need to remove placeholder and reload, or just add the new student
+      const hasPlaceholder = students.some(s => s.isYearPlaceholder)
+      if (hasPlaceholder) {
+        // Remove placeholder and reload
+        const placeholder = students.find(s => s.isYearPlaceholder)
+        if (placeholder) {
+          try {
+            await adminApi.deleteStudent(placeholder.regNo)
+          } catch (placeholderError) {
+            console.error('Failed to remove year placeholder:', placeholderError)
+          }
+        }
       loadStudents(selectedDept.name, selectedYear)
+      } else {
+        // Optimistically add the new student to the list
+        setStudents(prev => [newStudentObj, ...prev.filter(s => !s.isYearPlaceholder)])
+      }
+      
       // Clear message after 3 seconds
       setTimeout(() => setMessage(''), 3000)
     } catch (error) {
-      setMessage(error.message || 'Failed to add student')
-      setTimeout(() => setMessage(''), 3000)
+      // Display user-friendly error messages
+      let errorMessage = 'Failed to add student'
+      if (error.message) {
+        errorMessage = error.message
+      } else if (error.code === 'invalid_student_name') {
+        errorMessage = 'Example or demo student names are not allowed. Please use a real student name.'
+      } else if (error.code === 'student_exists') {
+        errorMessage = 'A student with this registration number already exists.'
+      } else if (error.code === 'missing_required_fields') {
+        errorMessage = 'Name, RegNo, and StudentId are required fields.'
+      }
+      setMessage(errorMessage)
+      setTimeout(() => setMessage(''), 5000)
     }
   }
 
@@ -817,14 +983,16 @@ export default function HierarchicalStudentView() {
 
   // LEVEL 2: YEARS VIEW
   if (viewLevel === 'years') {
-    // Define year order
+    // Define year order and standard years that should always be shown
     const yearOrder = ['1st Year', '2nd Year', '3rd Year', '4th Year', '5th Year']
+    const standardYears = ['1st Year', '2nd Year', '3rd Year', '4th Year']
     
-    // Get years from data (show all years including empty ones)
-    let years = Object.keys(selectedDept.students.byYear)
+    // Get years from data, but always include standard years even if empty
+    const yearsFromData = Object.keys(selectedDept.students.byYear || {})
+    const allYears = [...new Set([...standardYears, ...yearsFromData])]
     
     // Sort years according to the defined order
-    years = years.sort((a, b) => {
+    let years = allYears.sort((a, b) => {
       const indexA = yearOrder.indexOf(a)
       const indexB = yearOrder.indexOf(b)
       return (indexA === -1 ? 999 : indexA) - (indexB === -1 ? 999 : indexB)
@@ -886,14 +1054,14 @@ export default function HierarchicalStudentView() {
           {years.length === 0 ? (
             <div className="text-center py-12 bg-gray-50 rounded-xl">
               <div className="text-6xl mb-4">📚</div>
-              <h3 className="text-xl font-semibold text-gray-700 mb-2">No Years Yet</h3>
-              <p className="text-gray-600 mb-4">This department doesn't have any students yet.</p>
-              <p className="text-sm text-gray-500">Click "Add Year" above to prepare a year, then add students to it.</p>
+              <h3 className="text-xl font-semibold text-gray-700 mb-2">No Years Available</h3>
+              <p className="text-gray-600 mb-4">This department doesn't have any years configured yet.</p>
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
               {years.map(year => {
-              const count = selectedDept.students.byYear[year] || 0
+              // Always show count, defaulting to 0 if year doesn't exist in data
+              const count = (selectedDept.students?.byYear && selectedDept.students.byYear[year]) || 0
               // Get class advisor for this department-year combination
               const classAdvisor = hierarchyData[selectedDept.name]?.[year]?.classAdvisor
               
@@ -1386,6 +1554,19 @@ export default function HierarchicalStudentView() {
             {/* Excel Upload Tab */}
             {addStudentTab === 'excel' && (
               <div className="space-y-4">
+                {/* Error Message Display */}
+                {message && (
+                  <div className={`p-3 rounded-lg text-sm whitespace-pre-wrap ${
+                    message.includes('✅') || message.includes('Successfully') 
+                      ? 'bg-green-50 text-green-800 border border-green-200' 
+                      : message.includes('❌') || message.includes('Error') || message.includes('Failed')
+                      ? 'bg-red-50 text-red-800 border border-red-200'
+                      : 'bg-blue-50 text-blue-800 border border-blue-200'
+                  }`}>
+                    {message}
+                  </div>
+                )}
+                
                 {/* Excel Format Instructions */}
                 <div className="bg-green-50 border border-green-200 rounded-lg p-4">
                   <h3 className="font-semibold text-green-800 mb-2">📊 Excel Format Requirements</h3>
@@ -1412,11 +1593,17 @@ export default function HierarchicalStudentView() {
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">Select Excel File</label>
                   <input
+                    key={`excel-input-${showAddStudentModal}`}
                     type="file"
                     accept=".xlsx,.xls,.csv"
                     onChange={handleExcelFileChange}
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-green-50 file:text-green-700 hover:file:bg-green-100"
                   />
+                  {excelFile && (
+                    <p className="mt-2 text-sm text-gray-600">
+                      Selected: <span className="font-medium">{excelFile.name}</span> ({(excelFile.size / 1024).toFixed(2)} KB)
+                    </p>
+                  )}
                 </div>
 
                 {/* Excel Preview */}
@@ -1465,10 +1652,20 @@ export default function HierarchicalStudentView() {
                   <button 
                     type="button" 
                     onClick={handleBulkUpload}
-                    disabled={excelPreview.length === 0}
-                    className="px-4 py-2 bg-green-600 text-white rounded-lg disabled:bg-gray-300 disabled:cursor-not-allowed"
+                    disabled={excelPreview.length === 0 || isUploading}
+                    className="px-4 py-2 bg-green-600 text-white rounded-lg disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center gap-2"
                   >
-                    Upload {excelPreview.length} Students
+                    {isUploading ? (
+                      <>
+                        <span className="animate-spin">⏳</span>
+                        <span>Uploading...</span>
+                      </>
+                    ) : (
+                      <>
+                        <span>📤</span>
+                        <span>Upload {excelPreview.length} Students</span>
+                      </>
+                    )}
                   </button>
                 </div>
               </div>

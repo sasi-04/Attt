@@ -16,14 +16,46 @@ export default function Dashboard(){
   useEffect(() => {
     const fetchDashboardData = async () => {
       try {
-        const data = await apiGet('/dashboard/stats')
+        console.log('=== FETCHING STAFF DASHBOARD DATA ===')
+        
+        // Get staff email from localStorage
+        const user = JSON.parse(localStorage.getItem('ams_user') || '{}')
+        const staffEmail = user.email
+        
+        if (!staffEmail) {
+          console.error('No staff email found in localStorage')
+          setLoading(false)
+          return
+        }
+        
+        console.log('Staff email:', staffEmail)
+        
+        // Use staff-specific dashboard endpoint
+        const params = new URLSearchParams()
+        params.append('staffEmail', staffEmail)
+        
+        console.log('Making API call to:', `/staff/dashboard/stats?${params.toString()}`)
+        const data = await apiGet(`/staff/dashboard/stats?${params.toString()}`)
+        console.log('Staff dashboard data received:', data)
+        console.log('Total Students in department:', data.totalStudents)
+        console.log('Allowed departments:', data.allowedDepartments)
+        console.log('Full response object:', JSON.stringify(data, null, 2))
+        
         setDashboardData(data)
         
         // Fetch pending leave requests
         const leaveData = await apiGet('/leave/requests?status=pending')
         setPendingLeaves(leaveData.requests || [])
       } catch (error) {
-        console.error('Failed to fetch dashboard stats:', error)
+        console.error('Failed to fetch staff dashboard stats:', error)
+        // Fallback to general dashboard if staff endpoint fails
+        try {
+          console.log('Trying fallback to general dashboard...')
+          const fallbackData = await apiGet('/dashboard/stats')
+          setDashboardData(fallbackData)
+        } catch (fallbackError) {
+          console.error('Fallback dashboard also failed:', fallbackError)
+        }
       } finally {
         setLoading(false)
       }
@@ -31,12 +63,45 @@ export default function Dashboard(){
     fetchDashboardData()
   }, [])
 
-  const stats = [
-    { label: 'Total Students', value: dashboardData.totalStudents, icon: '👥' },
+  // Create stats array based on whether user is a class advisor
+  const isClassAdvisor = dashboardData.staffInfo?.isClassAdvisor
+  const advisorFor = dashboardData.staffInfo?.advisorFor
+  
+  const stats = []
+  
+  if (isClassAdvisor && advisorFor) {
+    // For class advisors: show both department total and their specific class
+    stats.push(
+      { 
+        label: `Department Total (${advisorFor.department})`, 
+        value: dashboardData.departmentTotalCount || dashboardData.totalStudents, 
+        icon: '🏢',
+        sub: 'All students in department'
+      },
+      { 
+        label: `My Class (${advisorFor.year})`, 
+        value: dashboardData.advisorClassCount || 0, 
+        icon: '👥',
+        sub: `${advisorFor.department} ${advisorFor.year} students`
+      }
+    )
+  } else {
+    // For regular staff: show department total
+    stats.push(
+      { 
+        label: 'Department Students', 
+        value: dashboardData.totalStudents, 
+        icon: '👥' 
+      }
+    )
+  }
+  
+  // Add common stats
+  stats.push(
     { label: 'Present Today', value: dashboardData.presentToday, sub: `${dashboardData.todayAttendanceRate}%`, icon: '✓' },
     { label: 'Absent Today', value: dashboardData.absentToday, icon: '✗' },
-    { label: 'Total Sessions', value: dashboardData.totalSessions || 0, icon: '📅' },
-  ]
+    { label: 'Total Sessions', value: dashboardData.totalSessions || 0, icon: '📅' }
+  )
   const average = dashboardData.overallAttendanceRate || 0
   const lowAttendance = dashboardData.lowAttendanceStudents
   const recentActivity = dashboardData.recentActivity.map(a => ({
@@ -55,7 +120,7 @@ export default function Dashboard(){
 
   return (
     <div className="space-y-6">
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+      <div className={`grid grid-cols-1 gap-4 ${isClassAdvisor ? 'md:grid-cols-5' : 'md:grid-cols-4'}`}>
         {stats.map((s) => (
           <div key={s.label} className="bg-white rounded-xl shadow-sm p-5">
             <div className="flex items-center justify-between">

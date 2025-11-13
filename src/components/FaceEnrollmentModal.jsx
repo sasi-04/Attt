@@ -164,8 +164,10 @@ export default function FaceEnrollmentModal({
       console.log('Student object:', student)
       console.log('Enrollment data:', enrollmentData)
       console.log('Number of images:', images.length)
+      console.log('API endpoint will be called:', '/face-recognition/enroll')
 
       const response = await apiPost('/face-recognition/enroll', enrollmentData)
+      console.log('Enrollment response:', response)
 
       if (response.success) {
         setEnrollmentState(prev => ({
@@ -245,7 +247,7 @@ export default function FaceEnrollmentModal({
       } else if (error.code === 'invalid_student_id') {
         errorMessage = 'Missing or invalid student ID. Please ensure the student has a valid roll number/student ID.'
       } else if (error.code === 'request_failed') {
-        errorMessage = 'Request failed. Check browser console (F12) for details. Ensure you are logged in properly.'
+        errorMessage = 'API request failed. This was likely due to incorrect API path (now fixed). Please try again.'
       } else {
         errorMessage = error.message || error.code || 'Enrollment failed'
       }

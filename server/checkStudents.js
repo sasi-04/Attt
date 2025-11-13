@@ -1,46 +1,40 @@
-import Datastore from 'nedb-promises'
-import path from 'path'
-import { fileURLToPath } from 'url'
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url))
+import { initDb, listAllStudents } from './db.js'
 
 async function checkStudents() {
-  const studentsDb = Datastore.create({ 
-    filename: path.resolve(__dirname, 'data/students.db'), 
-    autoload: true 
+  initDb()
+  const allStudents = await listAllStudents()
+  
+  console.log(`\nTotal students: ${allStudents.length}\n`)
+  
+  // Show all students with "Student" in the name
+  const studentsWithStudent = allStudents.filter(s => 
+    s.name && s.name.toLowerCase().includes('student')
+  )
+  
+  console.log(`Students with "Student" in name: ${studentsWithStudent.length}\n`)
+  
+  studentsWithStudent.forEach(student => {
+    console.log(`  - ${student.name} (${student.regNo}) - ${student.department} ${student.year}`)
   })
   
-  const allStudents = await studentsDb.find({})
+  // Show M.Tech students specifically
+  const mtechStudents = allStudents.filter(s => 
+    s.department === 'M.Tech' || s.department === 'Mtech'
+  )
   
-  console.log(`\n📊 Total students: ${allStudents.length}\n`)
-  
-  // Group by department
-  const byDept = {}
-  allStudents.forEach(s => {
-    const dept = s.department || 'No Department'
-    if (!byDept[dept]) byDept[dept] = []
-    byDept[dept].push(s)
+  console.log(`\nM.Tech students: ${mtechStudents.length}\n`)
+  mtechStudents.forEach(student => {
+    console.log(`  - ${student.name} (${student.regNo}) - ${student.year}`)
   })
   
-  console.log('Departments:')
-  Object.entries(byDept).forEach(([dept, students]) => {
-    console.log(`\n${dept}: ${students.length} students`)
-    
-    const byYear = {}
-    students.forEach(s => {
-      const year = s.year || 'No Year'
-      byYear[year] = (byYear[year] || 0) + 1
-    })
-    
-    Object.entries(byYear).forEach(([year, count]) => {
-      console.log(`  ${year}: ${count}`)
-    })
-  })
+  // Show CSE students specifically
+  const cseStudents = allStudents.filter(s => 
+    s.department === 'CSE' || s.department === 'Computer Science'
+  )
   
-  // Show first 3 students
-  console.log('\n\nFirst 3 students:')
-  allStudents.slice(0, 3).forEach(s => {
-    console.log(`  ${s.studentId || s.regNo} - ${s.name} - Dept: ${s.department || 'none'} - Year: ${s.year || 'none'}`)
+  console.log(`\nCSE students: ${cseStudents.length}\n`)
+  cseStudents.forEach(student => {
+    console.log(`  - ${student.name} (${student.regNo}) - ${student.year}`)
   })
 }
 

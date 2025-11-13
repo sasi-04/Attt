@@ -1,4 +1,4 @@
-export const API_BASE = import.meta.env.VITE_API_BASE || '/api'
+export const API_BASE = import.meta.env.VITE_API_BASE || ''
 
 export async function apiPost(path, body) {
   try {
@@ -11,7 +11,22 @@ export async function apiPost(path, body) {
       headers['x-staff-email'] = user.email
     }
     
-    const res = await fetch(`${API_BASE}${path}`, {
+    // Debug logging for face enrollment
+    if (path.includes('face-recognition')) {
+      console.log('🔧 API DEBUG - Face enrollment request:')
+      console.log('- API_BASE:', API_BASE)
+      console.log('- Path:', path)
+      console.log('- Full URL:', `${API_BASE}${path}`)
+      console.log('- Headers:', headers)
+      console.log('- Body:', body)
+    }
+    
+    // Add cache busting for face enrollment to ensure fresh requests
+    const url = path.includes('face-recognition') 
+      ? `${API_BASE}${path}?t=${Date.now()}`
+      : `${API_BASE}${path}`
+    
+    const res = await fetch(url, {
       method: 'POST',
       headers: headers,
       body: JSON.stringify(body || {})
@@ -19,6 +34,16 @@ export async function apiPost(path, body) {
     const text = await res.text()
     let data = {}
     try { data = text ? JSON.parse(text) : {} } catch { data = { raw: text } }
+    
+    // Debug logging for face enrollment responses
+    if (path.includes('face-recognition')) {
+      console.log('🔧 API DEBUG - Response:')
+      console.log('- Status:', res.status)
+      console.log('- OK:', res.ok)
+      console.log('- Response text:', text)
+      console.log('- Parsed data:', data)
+    }
+    
     if (!res.ok) {
       const error = Object.assign(
         new Error(data.message || data.error || 'request_failed'), 
@@ -86,6 +111,21 @@ export async function apiPut(path, body) {
     }
     throw err
   }
+}
+
+export async function apiDelete(path) {
+  // Get staff email from localStorage for authentication
+  const user = JSON.parse(localStorage.getItem('ams_user') || localStorage.getItem('user') || '{}')
+  const headers = {}
+  if (user.email) {
+    headers['x-staff-email'] = user.email
+  }
+  const res = await fetch(`${API_BASE}${path}`, { method: 'DELETE', headers })
+  const text = await res.text()
+  let data = {}
+  try { data = text ? JSON.parse(text) : {} } catch { data = { raw: text } }
+  if (!res.ok) throw Object.assign(new Error(data.message || data.error || 'request_failed'), { code: data.error, status: res.status, raw: data })
+  return data
 }
 
 // Staff API functions (merged - no duplicates)

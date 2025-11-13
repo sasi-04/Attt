@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { staffApi, adminApi, apiGet } from './api.js'
+import { staffApi, adminApi, apiGet, apiDelete } from './api.js'
 import AddStudentModal from './AddStudentModal.jsx'
 import FaceEnrollmentModal from './FaceEnrollmentModal.jsx'
 
@@ -56,9 +56,18 @@ export default function StaffDepartmentView() {
       if (response && response.departments) {
         const staffDept = response.departments.find(d => d.name === deptName)
         
-        if (staffDept && staffDept.years) {
-          // Get all years from the department
-          const availableYears = staffDept.years || []
+        // Standard years that should always be shown
+        const standardYears = ['1st Year', '2nd Year', '3rd Year', '4th Year']
+        
+        if (staffDept) {
+          // Get all years from the department, ensuring standard years are always included
+          const yearsFromData = staffDept.years || []
+          const availableYears = [...new Set([...standardYears, ...yearsFromData])].sort((a, b) => {
+            const order = ['1st Year', '2nd Year', '3rd Year', '4th Year', '5th Year']
+            const indexA = order.indexOf(a)
+            const indexB = order.indexOf(b)
+            return (indexA === -1 ? 999 : indexA) - (indexB === -1 ? 999 : indexB)
+          })
           console.log('Available years for', deptName, ':', availableYears)
           
           // Get student counts for each year
@@ -70,6 +79,18 @@ export default function StaffDepartmentView() {
                 console.log(`Response for ${year}:`, studentsResponse)
                 
                 if (studentsResponse && studentsResponse.students && Array.isArray(studentsResponse.students)) {
+                  // Helper to check if student is example
+                  const isExampleStudent = (s) => {
+                    if (!s || !s.name) return false
+                    if (s.isYearPlaceholder || s.isPlaceholder || s.isDepartmentPlaceholder) return false
+                    const name = (s.name || '').trim()
+                    return /\bStudent\s+\d+\b/i.test(name) || 
+                           /Demo Student/i.test(name) || 
+                           /Example Student/i.test(name) ||
+                           /Test Student/i.test(name) ||
+                           /^(CSE|ECE|MECH|CIVIL|M\.Tech|Mtech|MTECH)\s+Student\s+\d+$/i.test(name)
+                  }
+                  
                   const studentCount = studentsResponse.students.filter(s => 
                     s && 
                     !s.isYearPlaceholder && 
@@ -77,7 +98,8 @@ export default function StaffDepartmentView() {
                     !s.isPlaceholder &&
                     s.name &&
                     !s.name.includes('[Year:') && 
-                    !s.name.includes('[Department:')
+                    !s.name.includes('[Department:') &&
+                    !isExampleStudent(s)
                   ).length
                   console.log(`Student count for ${year}: ${studentCount}`)
                   return {
@@ -111,8 +133,15 @@ export default function StaffDepartmentView() {
           // Don't auto-select - always show years view first
           // User must click on a year to see students
         } else {
-          setMessage(`No years available for ${deptName}`)
-          setYears([])
+          // Even if no years in data, show standard years with 0 counts
+          const standardYears = ['1st Year', '2nd Year', '3rd Year', '4th Year']
+          const emptyYears = standardYears.map(year => ({
+            name: year,
+            department: deptName,
+            studentCount: 0
+          }))
+          setYears(emptyYears)
+          setMessage('')
         }
       } else {
         setMessage('Failed to load department information')
@@ -206,7 +235,19 @@ export default function StaffDepartmentView() {
       }
       
       if (response && response.students && Array.isArray(response.students)) {
-        // Filter out placeholder entries
+        // Helper to check if student is example
+        const isExampleStudent = (s) => {
+          if (!s || !s.name) return false
+          if (s.isYearPlaceholder || s.isPlaceholder || s.isDepartmentPlaceholder) return false
+          const name = (s.name || '').trim()
+          return /\bStudent\s+\d+\b/i.test(name) || 
+                 /Demo Student/i.test(name) || 
+                 /Example Student/i.test(name) ||
+                 /Test Student/i.test(name) ||
+                 /^(CSE|ECE|MECH|CIVIL|M\.Tech|Mtech|MTECH)\s+Student\s+\d+$/i.test(name)
+        }
+        
+        // Filter out placeholder entries and example students
         const filteredStudents = response.students.filter(s => {
           if (!s) return false
           const isValid = !s.isYearPlaceholder && 
@@ -214,7 +255,8 @@ export default function StaffDepartmentView() {
                          !s.isPlaceholder &&
                          s.name && 
                          !s.name.includes('[Year:') && 
-                         !s.name.includes('[Department:')
+                         !s.name.includes('[Department:') &&
+                         !isExampleStudent(s)
           if (!isValid) {
             console.log('Filtered out student:', s)
           }
@@ -530,7 +572,34 @@ export default function StaffDepartmentView() {
                       </td>
                       <td className="py-3 px-4">
                         {isStudentEnrolled(student.studentId, student.regNo) ? (
-                          <span className="text-green-600 text-sm">✅ Enrolled</span>
+                          staffInfo?.isClassAdvisor && isClassAdvisorForYear(selectedYear.name) ? (
+                            <div className="flex items-center gap-2">
+                              <span className="text-green-600 text-sm">✅ Enrolled</span>
+                              <button
+                                onClick={async () => {
+                                  const id = (student.studentId || student.regNo || '').toString().trim()
+                                  if (!id) return
+                                  if (!confirm(`Remove enrolled face for ${student.name} (${id})?`)) return
+                                  try {
+                                    const staffEmail = staffInfo?.email || ''
+                                    await apiDelete(`/face-recognition/unenroll/${encodeURIComponent(id)}${staffEmail ? `?staffEmail=${encodeURIComponent(staffEmail)}` : ''}`)
+                                    // Optimistically update local list
+                                    setEnrolledStudents(prev => prev.filter(e => (e?.student_id !== id && e?.roll_no !== id)))
+                                    // Background refresh
+                                    apiGet('/face-recognition/students').then(r => setEnrolledStudents(r.students || [])).catch(()=>{})
+                                  } catch (err) {
+                                    console.error('Unenroll failed:', err)
+                                    alert(`Failed to remove face enrollment${err?.message ? `: ${err.message}` : ''}`)
+                                  }
+                                }}
+                                className="px-2 py-0.5 bg-red-100 hover:bg-red-200 text-red-700 rounded text-xs transition-colors"
+                              >
+                                Remove Face
+                              </button>
+                            </div>
+                          ) : (
+                            <span className="text-green-600 text-sm">✅ Enrolled</span>
+                          )
                         ) : staffInfo?.isClassAdvisor && isClassAdvisorForYear(selectedYear.name) ? (
                           <button
                             onClick={() => handleFaceEnrollment(student)}
