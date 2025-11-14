@@ -3,6 +3,7 @@ import { apiPost, apiGet } from './api.js'
 
 export default function FaceRecognitionCamera({ 
   sessionId, 
+  courseId = '21CS701',
   onRecognitionSuccess, 
   onRecognitionError,
   onClose,
@@ -99,7 +100,7 @@ export default function FaceRecognitionCamera({
     try {
       await apiPost('/face-recognition/session/start', {
         sessionId,
-        courseId: '21CS701', // Default course ID
+        courseId,
         department,
         year
       })
@@ -111,7 +112,7 @@ export default function FaceRecognitionCamera({
         message: 'Failed to start recognition session'
       }))
     }
-  }, [sessionId, department, year])
+  }, [sessionId, courseId, department, year])
 
   // Capture and process frame
   const captureAndRecognize = useCallback(async () => {
@@ -137,8 +138,9 @@ export default function FaceRecognitionCamera({
     setRecognitionState(prev => ({ ...prev, isProcessing: true }))
 
     try {
-      // Send to face recognition service
-      const response = await fetch('http://localhost:5001/recognize', {
+      // Send to face recognition service via backend proxy
+      // The backend will forward to the face service on port 5001
+      const response = await fetch('/face-recognition/recognize', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -197,6 +199,9 @@ export default function FaceRecognitionCamera({
           isProcessing: false,
           message: result.message || 'Face not recognized. Please try again.'
         }))
+        if (result.attendance_error && onRecognitionError) {
+          onRecognitionError(result.message || 'Attendance logging failed.')
+        }
       }
     } catch (error) {
       console.error('Recognition error:', error)

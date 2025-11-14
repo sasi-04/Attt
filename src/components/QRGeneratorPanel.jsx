@@ -2,9 +2,11 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { apiGet, apiPost } from './api.js'
 import { getSocket } from './ws.js'
 import { QRCodeCanvas } from 'qrcode.react'
+import { useAuth } from '../context/AuthContext.jsx'
 
-export default function QRGeneratorPanel({ heading = 'Live Attendance QR', defaultCourseId = 'COURSE1' }){
-  const [courseId, setCourseId] = useState(defaultCourseId)
+export default function QRGeneratorPanel({ heading = 'Live Attendance QR' }){
+  const { user } = useAuth()
+  const courseId = user?.advisorFor?.courseId || '21CS701'
   const [sessionId, setSessionId] = useState(null)
   const [qr, setQr] = useState(null)
   const [secondsRemaining, setSecondsRemaining] = useState(null)
@@ -13,6 +15,8 @@ export default function QRGeneratorPanel({ heading = 'Live Attendance QR', defau
   const [error, setError] = useState('')
   const socket = useMemo(() => getSocket(), [])
   const imgRef = useRef(null)
+  const assignedDepartment = user?.advisorFor?.department || user?.department || null
+  const assignedYear = user?.advisorFor?.year || user?.year || null
 
   useEffect(() => {
     if (!sessionId) return
@@ -75,7 +79,11 @@ export default function QRGeneratorPanel({ heading = 'Live Attendance QR', defau
       setSecondsRemaining(null)
       setLoading(true)
       setError('')
-      const res = await apiPost('/qr/generate', { courseId })
+      const res = await apiPost('/qr/generate', { 
+        courseId,
+        sessionDepartment: assignedDepartment,
+        sessionYear: assignedYear
+      })
       setSessionId(res.sessionId)
       setQr({ imageDataUrl: res.imageDataUrl, token: res.token, code: res.code || null, expiresAt: res.expiresAt, jti: res.jti })
       // Ensure any clipboard/manual use has the fresh token
@@ -94,7 +102,12 @@ export default function QRGeneratorPanel({ heading = 'Live Attendance QR', defau
       setSecondsRemaining(null)
       setLoading(true)
       setError('')
-      const res = await apiPost('/qr/generate', { courseId, sessionId })
+      const res = await apiPost('/qr/generate', { 
+        courseId, 
+        sessionId,
+        sessionDepartment: assignedDepartment,
+        sessionYear: assignedYear
+      })
       setSessionId(res.sessionId)
       setQr({ imageDataUrl: res.imageDataUrl, token: res.token, code: res.code || null, expiresAt: res.expiresAt, jti: res.jti })
       try { await navigator.clipboard.writeText(res.token) } catch {}
@@ -125,10 +138,6 @@ export default function QRGeneratorPanel({ heading = 'Live Attendance QR', defau
       <div className="flex items-center justify-between mb-4">
         <div className="text-lg font-semibold text-gray-900 dark:text-white">{heading}</div>
         <div className="flex gap-2">
-          <select value={courseId} onChange={(e) => setCourseId(e.target.value)} className="px-3 py-2 rounded-md border border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-700 text-gray-900 dark:text-white">
-            <option value="COURSE1">COURSE1</option>
-            <option value="COURSE2">COURSE2</option>
-          </select>
           <button onClick={sessionId ? regenerateQR : startSession} disabled={loading} className="px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-60 transition-colors">{loading ? 'Generating…' : 'Generate QR (30s)'}</button>
           {sessionId && (
             <button onClick={closeSession} className="px-3 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors">Close</button>

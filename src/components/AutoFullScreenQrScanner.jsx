@@ -82,10 +82,96 @@ export default function AutoFullScreenQrScanner({ onDecode, onError, onClose, co
     if (onClose) onClose()
   }
 
-  const handleDecode = (result) => {
-    if (onDecode) {
-      onDecode(result)
+  const extractCodeFromResult = (value) => {
+    if (!value) return ''
+    
+    // If it's already a string, return it
+    if (typeof value === 'string') {
+      // Handle URL-encoded strings
+      try {
+        return decodeURIComponent(value)
+      } catch {
+        return value
+      }
     }
+    
+    // If it's an array, get the first element
+    if (Array.isArray(value) && value.length > 0) {
+      return extractCodeFromResult(value[0])
+    }
+    
+    // If it's an object, try common property names
+    if (typeof value === 'object') {
+      // Try various property names that QR scanner libraries might use
+      const possibleProps = ['rawValue', 'text', 'data', 'result', 'value', 'decodedText', 'decodedTextValue']
+      for (const prop of possibleProps) {
+        if (typeof value[prop] === 'string' && value[prop]) {
+          return extractCodeFromResult(value[prop])
+        }
+      }
+      
+      // If object has toString, try it
+      if (value.toString && value.toString !== Object.prototype.toString) {
+        const str = value.toString()
+        if (str && str !== '[object Object]') {
+          return extractCodeFromResult(str)
+        }
+      }
+    }
+    
+    // Last resort: convert to string
+    const str = String(value || '')
+    return str === '[object Object]' ? '' : str
+  }
+
+  const handleDecode = (result) => {
+    console.log('[QR-SCAN] Raw decode result:', { result, type: typeof result, isArray: Array.isArray(result) })
+    
+    const raw = extractCodeFromResult(result)
+    console.log('[QR-SCAN] Extracted raw value:', { raw, length: raw?.length, preview: raw?.substring(0, 50) })
+    
+    if (!raw || !raw.trim()) {
+      console.warn('[QR-SCAN] Empty scan result after extraction, ignoring.', { result, raw })
+      return
+    }
+    
+    // Remove any URL encoding or extra whitespace
+    let trimmed = raw.trim()
+    
+    // Remove any URL prefixes if present (e.g., "http://...?token=...")
+    if (trimmed.includes('token=')) {
+      const match = trimmed.match(/token=([^&]+)/)
+      if (match) trimmed = match[1]
+    }
+    
+    // Remove any JSON wrapper if present
+    if (trimmed.startsWith('{') && trimmed.includes('token')) {
+      try {
+        const parsed = JSON.parse(trimmed)
+        trimmed = parsed.token || trimmed
+      } catch {}
+    }
+    
+    // JWT tokens contain dots and are case-sensitive - don't uppercase them
+    // Short codes are alphanumeric and can be uppercased
+    const isJWT = trimmed.includes('.')
+    const cleaned = isJWT ? trimmed : trimmed.toUpperCase()
+    
+    if (!cleaned) {
+      console.warn('[QR-SCAN] Empty result after cleaning, ignoring.')
+      return
+    }
+    
+    console.log('[QR-SCAN] Final cleaned token:', {
+      type: isJWT ? 'JWT' : 'Short Code',
+      length: cleaned.length,
+      preview: isJWT ? `${cleaned.substring(0, 30)}...${cleaned.substring(cleaned.length - 10)}` : cleaned
+    })
+    
+    if (onDecode) {
+      onDecode(cleaned)
+    }
+    
     // Auto-exit fullscreen after successful scan
     if (isFullScreen) {
       exitFullScreen()

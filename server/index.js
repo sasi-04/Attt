@@ -6,7 +6,7 @@ import http from 'http'
 import { Server as SocketIOServer } from 'socket.io'
 import path from 'path'
 import { fileURLToPath } from 'url'
-import { initDb, createSession as dbCreateSession, saveToken as dbSaveToken, saveShortCode as dbSaveShortCode, deactivateToken as dbDeactivateToken, deleteShortCode as dbDeleteShortCode, markPresent as dbMarkPresent, enrollStudent, unenrollStudent, getEnrollments as dbGetEnrollments, isEnrolled as dbIsEnrolled, getEnrollmentRecords as dbGetEnrollmentRecords, getAllEnrollmentRecords, createStudent, getStudentByRegNo, dbGetStudentByRegNo, dbCreateStudent, dbUpdateStudentPassword, createStaff, getStaffByEmail, getStaffById, listStaff, updateStaff, deleteStaff, getStaffCount, listAllStudents, updateStudent, deleteStudent, getStudentCount, getStudentAttendance, getAllAttendanceRecords, getSessionById, getAllSessions, createLeaveRequest, getAllLeaveRequests, getLeaveRequestsByStudent, getLeaveRequestsByStatus, updateLeaveStatus, deleteLeaveRequest, getSystemSettings, updateSystemSettings } from './db.js'
+import { initDb, createSession as dbCreateSession, saveToken as dbSaveToken, saveShortCode as dbSaveShortCode, deactivateToken as dbDeactivateToken, deleteShortCode as dbDeleteShortCode, markPresent as dbMarkPresent, enrollStudent, unenrollStudent, getEnrollments as dbGetEnrollments, isEnrolled as dbIsEnrolled, getEnrollmentRecords as dbGetEnrollmentRecords, getAllEnrollmentRecords, createStudent, getStudentByRegNo, dbGetStudentByRegNo, dbCreateStudent, dbUpdateStudentPassword, createStaff, getStaffByEmail, getStaffById, listStaff, updateStaff, deleteStaff, getStaffCount, listAllStudents, updateStudent, deleteStudent, getStudentCount, getStudentAttendance, getAllAttendanceRecords, getSessionById, getAllSessions, createLeaveRequest, getAllLeaveRequests, getLeaveRequestsByStudent, getLeaveRequestsByStatus, updateLeaveStatus, deleteLeaveRequest, getSystemSettings, updateSystemSettings, getJtiByCode as dbGetJtiByCode, getToken as dbGetToken, getSessionById as dbGetSessionById } from './db.js'
 
 const app = express()
 initDb()
@@ -39,7 +39,8 @@ function broadcastAdminUpdate(eventType, data) {
 }
 
 app.use(cors({ origin: allowedOrigins }))
-app.use(express.json())
+app.use(express.json({ limit: '25mb' }))
+app.use(express.urlencoded({ extended: true, limit: '25mb' }))
 
 // Debug endpoint to check what's connected vs what should be connected
 app.get('/debug/connection-status', async (req, res) => {
@@ -561,7 +562,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-me'
 })()
 
 // In-memory stores for demo
-const sessions = new Map() // sessionId -> { courseId, startTime, endTime, status, windowSeconds, present:Set<string>, enrolled:Set<string>, currentTokenJti, tokenExpiresAt }
+const sessions = new Map() // sessionId -> { courseId, startTime, endTime, status, windowSeconds, present:Set<string>, enrolled:Set<string>, currentTokenJti, tokenExpiresAt, pendingFace:Map<string,{qrVerifiedAt:number,expiresAt:number}> }
 const tokens = new Map() // jti -> { sessionId, expiresAt, active, code? }
 const shortCodes = new Map() // code -> jti 
 
@@ -678,88 +679,308 @@ app.get('/sessions/:sessionId/qr', (req, res) => {
 
 // Student scan with hierarchical access control
 app.post('/attendance/scan', async (req, res) => {
-  const { token, studentId = 'student1', sessionDepartment, sessionYear } = req.body || {}
-  if (!token) return res.status(400).json({ error: 'token_required' })
-  if (!sessionDepartment || !sessionYear) {
-    return res.status(400).json({ error: 'session_context_required', message: 'Session department and year are required' })
-  }
+  const { token, studentId, sessionDepartment: requestedDepartment, sessionYear: requestedYear } = req.body || {}
+  const tokenPreview = token ? (token.length > 50 ? token.substring(0, 30) + '...' + token.substring(token.length - 10) : token) : 'missing'
+  console.log('[SCAN] Request received:', { 
+    tokenLength: token?.length, 
+    tokenPreview, 
+    studentId, 
+    requestedDepartment, 
+    requestedYear 
+  })
+  
+  if (!token) return res.status(400).json({ error: 'token_required', message: 'Token is required' })
+  if (!studentId) return res.status(400).json({ error: 'student_id_required', message: 'Student ID is required' })
   
   try {
-    // First check hierarchical access
-    const student = await dbGetStudentByRegNo(studentId)
+    // First check hierarchical access - try both regNo and studentId
+    let student = await dbGetStudentByRegNo(studentId)
     if (!student) {
-      return res.status(404).json({ error: 'student_not_found' })
+      // Try finding by studentId field if regNo didn't work
+      const allStudents = await listAllStudents()
+      student = allStudents.find(s => s.studentId === studentId || s.regNo === studentId)
+    }
+    if (!student) {
+      console.log('[SCAN] Student not found:', studentId)
+      return res.status(404).json({ error: 'student_not_found', message: `Student ${studentId} not found` })
     }
     
     const studentDept = student.department || 'M.Tech'
     const studentYear = student.year || '4th Year'
+    console.log('[SCAN] Student found:', { regNo: student.regNo, studentId: student.studentId, dept: studentDept, year: studentYear })
     
     // Enforce hierarchical access control
-    if (studentDept !== sessionDepartment || studentYear !== sessionYear) {
-      console.log(`Access denied: Student ${studentId} (${studentDept} ${studentYear}) tried to access ${sessionDepartment} ${sessionYear} session`)
-      return res.status(403).json({ 
-        error: 'access_denied',
-        message: `Access denied. This QR code is for ${sessionDepartment} ${sessionYear} students only.`,
-        studentDepartment: studentDept,
-        studentYear: studentYear,
-        sessionDepartment,
-        sessionYear
+    // JWT tokens contain dots and are case-sensitive, so don't uppercase them
+    // Short codes are alphanumeric and can be uppercased
+    // Also handle URLs or other wrappers that might contain the token
+    let rawToken = String(token).trim()
+    
+    // Extract token from URL if present (e.g., "http://example.com?token=...")
+    if (rawToken.includes('token=')) {
+      const urlMatch = rawToken.match(/token=([^&]+)/)
+      if (urlMatch) rawToken = urlMatch[1]
+    }
+    // Extract from JSON if wrapped
+    if (rawToken.startsWith('{') && rawToken.includes('token')) {
+      try {
+        const parsed = JSON.parse(rawToken)
+        rawToken = parsed.token || rawToken
+      } catch {}
+    }
+    
+    const isJWT = rawToken.includes('.')
+    const cleaned = isJWT ? rawToken : rawToken.toUpperCase()
+    
+    console.log('[SCAN] Token processing:', {
+      originalLength: String(token).length,
+      cleanedLength: cleaned.length,
+      isJWT,
+      preview: isJWT ? `${cleaned.substring(0, 20)}...${cleaned.substring(cleaned.length - 10)}` : cleaned
+    })
+    
+    let jti
+    let sessionId
+    if (isJWT) {
+      try {
+        const payload = jwt.verify(cleaned, JWT_SECRET)
+        jti = payload.jti
+        sessionId = payload.sid
+        console.log('[SCAN] JWT token verified:', { jti, sessionId, exp: payload.exp, iat: payload.iat })
+      } catch (jwtErr) {
+        console.error('[SCAN] JWT verification failed:', {
+          error: jwtErr.name,
+          message: jwtErr.message,
+          tokenPreview: cleaned.substring(0, 50)
+        })
+        if (jwtErr.name === 'TokenExpiredError') {
+          return res.status(410).json({ error: 'expired_code', message: 'QR code has expired' })
+        }
+        if (jwtErr.name === 'JsonWebTokenError') {
+          return res.status(400).json({ error: 'invalid_code', message: 'Invalid QR code format. Please scan again.' })
+        }
+        return res.status(400).json({ error: 'invalid_code', message: `Invalid QR code: ${jwtErr.message}` })
+      }
+    } else {
+      console.log('[SCAN] short-code attempt', cleaned, 'inMemory?', shortCodes.has(cleaned))
+      let mapped = shortCodes.get(cleaned)
+      if (!mapped) {
+        try {
+          mapped = await dbGetJtiByCode(cleaned)
+          console.log('[SCAN] looked up code in DB', cleaned, 'found?', !!mapped)
+        } catch (lookupErr) {
+          console.warn('Failed to query code mapping from DB:', lookupErr)
+        }
+      }
+      if (!mapped) {
+        console.error('[SCAN] Short code not found:', {
+          code: cleaned,
+          inMemory: shortCodes.has(cleaned),
+          memorySize: shortCodes.size,
+          allCodes: Array.from(shortCodes.keys()).slice(0, 5)
+        })
+        return res.status(400).json({ 
+          error: 'invalid_code', 
+          message: 'Invalid code. Please check the code and try again, or scan the QR code.' 
+        })
+      }
+      jti = mapped
+      console.log('[SCAN] Short code mapped to jti:', jti)
+      const tokRec = tokens.get(jti)
+      if (tokRec?.sessionId) {
+        sessionId = tokRec.sessionId
+      } else {
+        try {
+          const persistedToken = await dbGetToken(jti)
+          console.log('[SCAN] loaded persisted token for', jti, 'found?', !!persistedToken)
+          sessionId = persistedToken?.sessionId
+        } catch (tokenLookupErr) {
+          console.warn('Failed to load persisted token for jti', jti, tokenLookupErr)
+        }
+      }
+    }
+    let tok = tokens.get(jti)
+    console.log('[SCAN] Token lookup:', { 
+      jti, 
+      sessionId, 
+      inMemory: !!tok,
+      tokSessionId: tok?.sessionId,
+      tokActive: tok?.active,
+      tokExpiresAt: tok?.expiresAt
+    })
+    
+    if (!tok || tok.sessionId !== sessionId) {
+      try {
+        console.log('[SCAN] Token not in memory, checking database...')
+        const persistedToken = await dbGetToken(jti)
+        console.log('[SCAN] Persisted token found:', {
+          found: !!persistedToken,
+          persistedSessionId: persistedToken?.sessionId,
+          persistedActive: persistedToken?.active
+        })
+        if (persistedToken?.sessionId === sessionId) {
+          tok = persistedToken
+          // Convert DB format to memory format
+          tokens.set(jti, { 
+            sessionId: persistedToken.sessionId, 
+            expiresAt: persistedToken.expiresAt, 
+            active: persistedToken.active === 1 || persistedToken.active === true || persistedToken.active === '1', 
+            code: persistedToken.code 
+          })
+          // Also restore short code mapping if exists
+          if (persistedToken.code) {
+            shortCodes.set(persistedToken.code, jti)
+          }
+          console.log('[SCAN] Token hydrated from DB successfully')
+        }
+      } catch (err) {
+        console.error('[SCAN] Failed to hydrate token from DB:', err)
+      }
+    }
+    
+    if (!tok) {
+      console.error('[SCAN] Token not found after all lookups:', { jti, sessionId })
+      return res.status(400).json({ 
+        error: 'invalid_code', 
+        message: 'Token not found. The QR code may have expired or been regenerated. Please ask staff to generate a new QR code.',
+        debug: process.env.NODE_ENV === 'development' ? { jti, sessionId } : undefined
       })
     }
     
-    const cleaned = String(token).trim().toUpperCase()
-    let jti
-    let sessionId
-    if (cleaned.includes('.')) {
-      const payload = jwt.verify(cleaned, JWT_SECRET)
-      jti = payload.jti
-      sessionId = payload.sid
-    } else {
-      const mapped = shortCodes.get(cleaned)
-      if (!mapped) return res.status(400).json({ error: 'invalid_code' })
-      jti = mapped
-      const tokRec = tokens.get(jti)
-      sessionId = tokRec?.sessionId
+    if (tok.sessionId !== sessionId) {
+      console.error('[SCAN] Session mismatch:', { 
+        jti, 
+        expectedSessionId: sessionId,
+        tokenSessionId: tok.sessionId
+      })
+      return res.status(400).json({ 
+        error: 'invalid_code', 
+        message: 'QR code session mismatch. Please scan the current QR code.',
+        debug: process.env.NODE_ENV === 'development' ? { jti, expectedSessionId: sessionId, tokenSessionId: tok.sessionId } : undefined
+      })
     }
-    const tok = tokens.get(jti)
-    if (!tok || tok.sessionId !== sessionId) return res.status(400).json({ error: 'invalid_code' })
-    if (!tok.active) return res.status(409).json({ error: 'already_used' })
-    const sess = sessions.get(sessionId)
+    const isActive = tok.active === true || tok.active === 1 || tok.active === '1'
+    console.log('[SCAN] Token active status:', { 
+      active: tok.active, 
+      isActive, 
+      expiresAt: tok.expiresAt,
+      now: Date.now(),
+      expired: tok.expiresAt && Date.now() > tok.expiresAt
+    })
+    if (!isActive) {
+      return res.status(409).json({ error: 'already_used', message: 'This token has already been used. Please ask staff to generate a new QR code.' })
+    }
+    let sess = sessions.get(sessionId)
+    if (!sess) {
+      try {
+        const persistedSession = await dbGetSessionById(sessionId)
+        if (persistedSession) {
+          if (persistedSession) {
+            sess = {
+              courseId: persistedSession.courseId,
+              startTime: persistedSession.startTime,
+              endTime: persistedSession.endTime,
+              status: persistedSession.status || 'active',
+              windowSeconds: persistedSession.windowSeconds || 30,
+              present: new Set(),
+              enrolled: new Set(await dbGetEnrollments(persistedSession.courseId)),
+              currentTokenJti: persistedSession.currentTokenJti || null,
+              tokenExpiresAt: persistedSession.tokenExpiresAt || null,
+              pendingFace: new Map(),
+              sessionDepartment: persistedSession.sessionDepartment || null,
+              sessionYear: persistedSession.sessionYear || null
+            }
+            sessions.set(sessionId, sess)
+          }
+        }
+      } catch (err) {
+        console.warn('Failed to hydrate session from DB', err)
+      }
+    }
     if (!sess) return res.status(410).json({ error: 'session_closed' })
-    if (Date.now() >= tok.expiresAt) return res.status(410).json({ error: 'expired_code' })
-    const enrolled = await dbIsEnrolled(sess.courseId, studentId)
-    if (!enrolled) return res.status(403).json({ error: 'not_enrolled' })
+    if (!sess.pendingFace) sess.pendingFace = new Map()
+    const now = Date.now()
+    if (now >= tok.expiresAt) return res.status(410).json({ error: 'expired_code' })
+    
+    // Use student.studentId for enrollment check (enrollment table uses studentId field)
+    const enrollmentStudentId = student.studentId || student.regNo || studentId
+    console.log('[SCAN] Checking enrollment:', { courseId: sess.courseId, studentId: enrollmentStudentId, regNo: student.regNo })
+    const enrolled = await dbIsEnrolled(sess.courseId, enrollmentStudentId)
+    if (!enrolled) {
+      console.log('[SCAN] Enrollment check failed:', { courseId: sess.courseId, studentId: enrollmentStudentId })
+      return res.status(403).json({ error: 'not_enrolled', message: `Student ${enrollmentStudentId} is not enrolled in course ${sess.courseId}` })
+    }
 
-    sess.present.add(studentId)
+    const targetDepartment = sess.sessionDepartment || requestedDepartment || studentDept
+    const targetYear = sess.sessionYear || requestedYear || studentYear
+
+    if (targetDepartment && targetYear && (studentDept !== targetDepartment || studentYear !== targetYear)) {
+      console.log(`Access denied: Student ${studentId} (${studentDept} ${studentYear}) tried to access ${targetDepartment} ${targetYear} session`)
+      return res.status(403).json({ 
+        error: 'access_denied',
+        message: `Access denied. This QR code is for ${targetDepartment} ${targetYear} students only.`,
+        studentDepartment: studentDept,
+        studentYear: studentYear,
+        sessionDepartment: targetDepartment,
+        sessionYear: targetYear
+      })
+    }
+
+    // Require follow-up face verification within session window (default 30 seconds)
+    const windowMs = (sess.windowSeconds || 30) * 1000
+    const faceDeadlineMs = Math.min(tok.expiresAt, now + windowMs)
+    sess.pendingFace.set(enrollmentStudentId, { qrVerifiedAt: now, expiresAt: faceDeadlineMs })
     tok.active = false
     if (tok.code) shortCodes.delete(tok.code)
-    try { dbMarkPresent(sessionId, studentId); dbDeactivateToken(jti); if (tok.code) dbDeleteShortCode(tok.code) } catch {}
+    try { dbDeactivateToken(jti); if (tok.code) dbDeleteShortCode(tok.code) } catch {}
 
-    io.to(`session:${sessionId}`).emit('scan_confirmed', {
+    io.to(`session:${sessionId}`).emit('qr_step_completed', {
       sessionId,
-      countPresent: sess.present.size,
-      countRemaining: Math.max(0, sess.enrolled.size - sess.present.size)
+      studentId,
+      expiresAt: new Date(faceDeadlineMs).toISOString(),
+      pendingCount: sess.pendingFace.size
     })
 
-    console.log(`Access granted: Student ${studentId} (${studentDept} ${studentYear}) marked present in ${sessionDepartment} ${sessionYear} session`)
+    sess.sessionDepartment = targetDepartment
+    sess.sessionYear = targetYear
+
+    console.log(`QR verified: Student ${studentId} (${studentDept} ${studentYear}) must complete face scan by ${new Date(faceDeadlineMs).toISOString()} for ${targetDepartment} ${targetYear}`)
     return res.json({ 
-      status: 'present', 
+      status: 'qr_verified', 
       sessionId, 
-      markedAt: new Date().toISOString(),
+      studentId,
+      requiresFace: true,
+      faceDeadline: new Date(faceDeadlineMs).toISOString(),
+      courseId: sess.courseId,
+      sessionDepartment: targetDepartment,
+      sessionYear: targetYear,
       studentDepartment: studentDept,
-      studentYear: studentYear
+      studentYear: studentYear,
+      message: 'QR verified. Please complete face scan within 30 seconds to be marked present.'
     })
   } catch (e) {
-    console.error('Scan validate error:', e)
-    if (e.name === 'TokenExpiredError') return res.status(410).json({ error: 'expired_code' })
-    return res.status(400).json({ error: 'invalid_code', message: e?.message })
+    console.error('[SCAN] Scan validate error:', {
+      error: e.name,
+      message: e.message,
+      stack: e.stack?.substring(0, 200)
+    })
+    if (e.name === 'TokenExpiredError') {
+      return res.status(410).json({ error: 'expired_code', message: 'QR code has expired' })
+    }
+    if (e.name === 'JsonWebTokenError') {
+      return res.status(400).json({ error: 'invalid_code', message: 'Invalid QR code format' })
+    }
+    return res.status(400).json({ 
+      error: 'invalid_code', 
+      message: e?.message || 'Invalid QR code. Please scan again or use manual entry.',
+      details: process.env.NODE_ENV === 'development' ? e.message : undefined
+    })
   }
 })
 
 // Generate QR on-demand (new token per click). If sessionId missing or invalid, start new session
 app.post('/qr/generate', async (req, res) => {
   try {
-    const { sessionId: providedSessionId, courseId = 'COURSE1', sessionDepartment, sessionYear } = req.body || {}
+    const { sessionId: providedSessionId, courseId = '21CS701', sessionDepartment: requestedDepartment, sessionYear: requestedYear } = req.body || {}
     if (!courseId) return res.status(400).json({ error: 'course_required', message: 'courseId is required' })
     let sessionId = providedSessionId
     let sess = sessionId && sessions.get(sessionId)
@@ -777,10 +998,38 @@ app.post('/qr/generate', async (req, res) => {
         present: new Set(),
         enrolled: new Set(enrolled),
         currentTokenJti: null,
-        tokenExpiresAt: null
+        tokenExpiresAt: null,
+        pendingFace: new Map(),
+        sessionDepartment: null,
+        sessionYear: null
       }
       sessions.set(sessionId, sess)
     }
+    if (!sess.pendingFace) {
+      sess.pendingFace = new Map()
+    }
+    const staffEmail = req.headers['x-staff-email']
+    let resolvedDepartment = requestedDepartment || sess.sessionDepartment
+    let resolvedYear = requestedYear || sess.sessionYear
+    if ((!resolvedDepartment || !resolvedYear) && staffEmail) {
+      try {
+        const staff = await getStaffByEmail(staffEmail)
+        if (staff?.advisorFor) {
+          resolvedDepartment = resolvedDepartment || staff.advisorFor.department
+          resolvedYear = resolvedYear || staff.advisorFor.year
+        }
+        if (!resolvedDepartment && staff?.department) {
+          resolvedDepartment = staff.department
+        }
+        if (!resolvedYear && staff?.year) {
+          resolvedYear = staff.year
+        }
+      } catch (err) {
+        console.warn('Failed to resolve staff details for QR session:', err)
+      }
+    }
+    sess.sessionDepartment = resolvedDepartment || sess.sessionDepartment || null
+    sess.sessionYear = resolvedYear || sess.sessionYear || null
 
     // Deactivate any previously active token for this session
     if (sess.currentTokenJti && tokens.has(sess.currentTokenJti)) {
@@ -875,7 +1124,14 @@ app.post('/auth/student/login', async (req, res) => {
   const normalized = String(regNo).replace(/\s+/g, '').trim()
   const student = await dbGetStudentByRegNo(normalized)
   if (!student || student.password !== password) return res.status(401).json({ error: 'invalid_credentials' })
-  return res.json({ role: 'student', regNo: student.regNo, studentId: student.studentId, name: student.name })
+  return res.json({ 
+    role: 'student', 
+    regNo: student.regNo, 
+    studentId: student.studentId, 
+    name: student.name,
+    department: student.department || null,
+    year: student.year || null
+  })
 })
 
 // Student password change
@@ -3455,41 +3711,53 @@ app.post('/face-recognition/session/start', async (req, res) => {
       return res.status(404).json({ error: 'session_not_found' })
     }
     
-    // Call face recognition service to start session
-    const response = await fetch(`${FACE_SERVICE_URL}/session/start`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionId, courseId, department, year })
-    })
+    // Simple face service doesn't require session start - just verify it's available (non-blocking)
+    // Check health asynchronously without blocking the response
+    fetch(`${FACE_SERVICE_URL}/health`)
+      .then(healthResponse => {
+        if (healthResponse.ok) {
+          console.log('[FACE] Face service is available')
+        } else {
+          console.warn('[FACE] Face service health check failed:', healthResponse.status)
+        }
+      })
+      .catch(healthErr => {
+        console.warn('[FACE] Face service health check error (non-critical):', healthErr.message)
+        // Don't fail the request - face service might be starting up
+      })
     
-    if (!response.ok) {
-      const error = await response.json()
-      return res.status(response.status).json(error)
+    // Broadcast to admin panel that face recognition is active (non-blocking)
+    try {
+      broadcastAdminUpdate('face_recognition_started', {
+        sessionId,
+        courseId,
+        department,
+        year,
+        timestamp: Date.now()
+      })
+    } catch (broadcastErr) {
+      console.warn('[FACE] Broadcast error (non-critical):', broadcastErr.message)
     }
-    
-    const result = await response.json()
-    
-    // Broadcast to admin panel that face recognition is active
-    broadcastAdminUpdate('face_recognition_started', {
-      sessionId,
-      courseId,
-      department,
-      year,
-      timestamp: Date.now()
-    })
     
     return res.json({
       success: true,
       message: 'Face recognition session started',
       sessionId,
-      faceServiceStatus: result
+      courseId,
+      department,
+      year
     })
     
   } catch (error) {
-    console.error('Face recognition session start error:', error)
+    console.error('[FACE] Face recognition session start error:', {
+      error: error.name,
+      message: error.message,
+      stack: error.stack?.substring(0, 300)
+    })
     return res.status(500).json({ 
       error: 'internal_error',
-      message: 'Failed to start face recognition session'
+      message: 'Failed to start face recognition session',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
     })
   }
 })
@@ -3519,25 +3787,45 @@ app.post('/attendance/face-recognition', async (req, res) => {
       return res.status(403).json({ error: 'student_not_enrolled' })
     }
     
+    const targetDepartment = session.sessionDepartment || department
+    const targetYear = session.sessionYear || year
+
     // Check hierarchical access (same as QR scan)
     const student = await dbGetStudentByRegNo(studentId)
     if (student) {
       const studentDept = student.department || 'Computer Science'
       const studentYear = student.year || '4th Year'
       
-      if (studentDept !== department || studentYear !== year) {
-        console.log(`Face recognition access denied: Student ${studentId} (${studentDept} ${studentYear}) tried to access ${department} ${year} session`)
+      if (targetDepartment && targetYear && (studentDept !== targetDepartment || studentYear !== targetYear)) {
+        console.log(`Face recognition access denied: Student ${studentId} (${studentDept} ${studentYear}) tried to access ${targetDepartment} ${targetYear} session`)
         return res.status(403).json({ 
           error: 'access_denied',
-          message: `Access denied. This session is for ${department} ${year} students only.`,
+          message: `Access denied. This session is for ${targetDepartment} ${targetYear} students only.`,
           studentDepartment: studentDept,
           studentYear: studentYear,
-          sessionDepartment: department,
-          sessionYear: year
+          sessionDepartment: targetDepartment,
+          sessionYear: targetYear
         })
       }
     }
     
+    if (!session.pendingFace) session.pendingFace = new Map()
+    const pending = session.pendingFace.get(studentId)
+    const now = Date.now()
+    if (!pending) {
+      return res.status(409).json({
+        error: 'qr_step_required',
+        message: 'Please scan the QR code first to unlock face verification.'
+      })
+    }
+    if (pending.expiresAt && now > pending.expiresAt) {
+      session.pendingFace.delete(studentId)
+      return res.status(410).json({
+        error: 'face_window_expired',
+        message: 'Face verification window expired. Please scan the QR code again.'
+      })
+    }
+
     // Check if already marked present
     if (session.present.has(studentId)) {
       return res.status(409).json({ 
@@ -3548,6 +3836,7 @@ app.post('/attendance/face-recognition', async (req, res) => {
     
     // Mark present
     session.present.add(studentId)
+    session.pendingFace.delete(studentId)
     
     // Save to database
     try {
@@ -3567,6 +3856,12 @@ app.post('/attendance/face-recognition', async (req, res) => {
       countPresent: session.present.size,
       countRemaining: Math.max(0, session.enrolled.size - session.present.size)
     })
+
+    io.to(`session:${sessionId}`).emit('scan_confirmed', {
+      sessionId,
+      countPresent: session.present.size,
+      countRemaining: Math.max(0, session.enrolled.size - session.present.size)
+    })
     
     // Broadcast to admin panel
     broadcastAdminUpdate('face_attendance_marked', {
@@ -3578,7 +3873,7 @@ app.post('/attendance/face-recognition', async (req, res) => {
       timestamp: Date.now()
     })
     
-    console.log(`Face recognition attendance: Student ${studentId} marked present in session ${sessionId} (confidence: ${confidence})`)
+    console.log(`Face recognition attendance: Student ${studentId} marked present in session ${sessionId} (${targetDepartment || 'Unknown'} ${targetYear || 'Unknown'}) (confidence: ${confidence})`)
     
     return res.json({
       success: true,
@@ -3588,6 +3883,8 @@ app.post('/attendance/face-recognition', async (req, res) => {
       markedAt,
       confidence,
       source: 'face_recognition',
+      sessionDepartment: targetDepartment,
+      sessionYear: targetYear,
       message: 'Attendance marked successfully via face recognition'
     })
     
@@ -3634,6 +3931,11 @@ app.get('/face-recognition/status', async (req, res) => {
 // Proxy face recognition enrollment requests
 app.post('/face-recognition/enroll', async (req, res) => {
   try {
+    console.log('[FACE] Forwarding enrollment request to service', {
+      studentId: req.body?.student_id,
+      images: Array.isArray(req.body?.images) ? req.body.images.length : 0
+    })
+
     const response = await fetch(`${FACE_SERVICE_URL}/enroll`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -3643,6 +3945,7 @@ app.post('/face-recognition/enroll', async (req, res) => {
     const result = await response.json()
     
     if (!response.ok) {
+      console.warn('[FACE] Enrollment service returned error', response.status, result)
       return res.status(response.status).json(result)
     }
     
@@ -3661,6 +3964,66 @@ app.post('/face-recognition/enroll', async (req, res) => {
     return res.status(500).json({ 
       error: 'internal_error',
       message: 'Failed to process face recognition enrollment'
+    })
+  }
+})
+
+// Proxy face recognition requests
+app.post('/face-recognition/recognize', async (req, res) => {
+  try {
+    console.log('[FACE] Forwarding recognition request to service', {
+      sessionId: req.body?.session_id,
+      expectedStudentId: req.body?.expected_student_id,
+      hasImage: !!req.body?.image
+    })
+
+    const response = await fetch(`${FACE_SERVICE_URL}/recognize`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body)
+    })
+    
+    const text = await response.text()
+    let result = {}
+    try {
+      result = text ? JSON.parse(text) : {}
+    } catch (parseErr) {
+      console.error('[FACE] Failed to parse response:', parseErr)
+      return res.status(500).json({ 
+        error: 'service_error',
+        message: 'Face recognition service returned invalid response'
+      })
+    }
+    
+    if (!response.ok) {
+      console.warn('[FACE] Recognition service returned error', response.status, result)
+      return res.status(response.status).json(result)
+    }
+    
+    return res.json(result)
+    
+  } catch (error) {
+    console.error('[FACE] Face recognition proxy error:', {
+      error: error.name,
+      message: error.message,
+      code: error.code,
+      stack: error.stack?.substring(0, 200),
+      serviceUrl: FACE_SERVICE_URL
+    })
+    
+    // Check if it's a connection error
+    if (error.code === 'ECONNREFUSED' || error.message.includes('fetch failed') || error.message.includes('ECONNREFUSED')) {
+      return res.status(503).json({ 
+        error: 'service_unavailable',
+        message: 'Face recognition service is not available. Please ensure the service is running on port 5001.',
+        service_url: FACE_SERVICE_URL
+      })
+    }
+    
+    return res.status(500).json({ 
+      error: 'internal_error',
+      message: 'Failed to connect to face recognition service',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
     })
   }
 })

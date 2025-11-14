@@ -25,6 +25,7 @@ export default defineConfig({
       '/qr': { target: 'http://localhost:3001', changeOrigin: true },
       '/sessions': { target: 'http://localhost:3001', changeOrigin: true },
       '/attendance': { target: 'http://localhost:3001', changeOrigin: true },
+      '/face-recognition': { target: 'http://localhost:3001', changeOrigin: true },
       '/socket.io': { target: 'http://localhost:3001', ws: true, changeOrigin: true }
     }
   }
