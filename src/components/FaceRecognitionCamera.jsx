@@ -164,7 +164,7 @@ export default function FaceRecognitionCamera({
           isProcessing: false,
           lastRecognition: result.student_id,
           confidence: result.confidence,
-          message: `Welcome ${result.student_id}! Attendance marked.`
+          message: 'Face detected, attendance marked'
         }))
 
         // Stop recognition
@@ -197,7 +197,7 @@ export default function FaceRecognitionCamera({
         setRecognitionState(prev => ({
           ...prev,
           isProcessing: false,
-          message: result.message || 'Face not recognized. Please try again.'
+          message: "Didn't recognize your face"
         }))
         if (result.attendance_error && onRecognitionError) {
           onRecognitionError(result.message || 'Attendance logging failed.')
@@ -233,7 +233,7 @@ export default function FaceRecognitionCamera({
         ...prev,
         message: 'Scanning for faces...'
       }))
-      recognitionIntervalRef.current = setInterval(captureAndRecognize, 2000) // Every 2 seconds
+      recognitionIntervalRef.current = setInterval(captureAndRecognize, 2000) // Every 2 seconds - optimized for fast recognition
     }
   }, [captureAndRecognize])
 

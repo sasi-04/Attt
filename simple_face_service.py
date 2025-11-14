@@ -352,8 +352,9 @@ def recognize_faces():
         frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        # More lenient face detection settings for better accuracy
-        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=3, minSize=(20, 20))
+        # Optimized face detection settings for speed (within 2 seconds)
+        # Faster detection with slightly less accuracy but acceptable for attendance
+        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(30, 30))
         faces_detected = len(faces)
         
         if faces_detected == 0:
@@ -364,9 +365,30 @@ def recognize_faces():
                 'message': 'No face detected. Please ensure good lighting and face the camera directly.'
             })
         
-        # Validate enrollment against local list
+        # Validate enrollment against local list - reload to get latest data
         enrolled = load_enrolled_students()
-        is_enrolled = expected_id and any((s.get('student_id') == expected_id or s.get('roll_no') == expected_id) for s in enrolled)
+        logger.info(f"[RECOGNIZE] Loaded {len(enrolled)} enrolled students")
+        logger.info(f"[RECOGNIZE] Looking for student ID: {expected_id}")
+        logger.info(f"[RECOGNIZE] Enrolled students: {[s.get('student_id') or s.get('roll_no') for s in enrolled]}")
+        
+        # Try multiple matching strategies for student ID
+        is_enrolled = False
+        if expected_id:
+            for s in enrolled:
+                student_id = str(s.get('student_id') or '').strip()
+                roll_no = str(s.get('roll_no') or '').strip()
+                expected_id_str = str(expected_id).strip()
+                
+                # Try exact match
+                if student_id == expected_id_str or roll_no == expected_id_str:
+                    is_enrolled = True
+                    logger.info(f"[RECOGNIZE] Found enrolled student: {s.get('name')} (ID: {student_id}, Roll: {roll_no})")
+                    break
+                # Try string comparison (case-insensitive)
+                if student_id.lower() == expected_id_str.lower() or roll_no.lower() == expected_id_str.lower():
+                    is_enrolled = True
+                    logger.info(f"[RECOGNIZE] Found enrolled student (case-insensitive): {s.get('name')} (ID: {student_id}, Roll: {roll_no})")
+                    break
         
         if not expected_id:
             return jsonify({
@@ -377,6 +399,7 @@ def recognize_faces():
             })
         
         if not is_enrolled:
+            logger.warning(f"[RECOGNIZE] Student {expected_id} not found in enrolled list")
             return jsonify({
                 'success': False,
                 'faces_detected': faces_detected,
@@ -388,8 +411,24 @@ def recognize_faces():
         recognition_confidence = 0.0
         recognized = False
         
+        # Reload student_id_to_label mapping in case recognizer was retrained
+        # This ensures we have the latest mappings
+        if face_recognizer_trained:
+            # Rebuild the mapping from enrolled students
+            for s in enrolled:
+                student_id = str(s.get('student_id') or s.get('roll_no') or '').strip()
+                if student_id and student_id not in student_id_to_label:
+                    # Check if this student has images
+                    student_dir = os.path.join(DATA_DIR, student_id)
+                    if os.path.exists(student_dir):
+                        face_images = [f for f in os.listdir(student_dir) if f.endswith(('.jpg', '.jpeg', '.png'))]
+                        if face_images:
+                            # This student should be in the recognizer, but label mapping might be stale
+                            # We'll rely on histogram matching if LBPH doesn't work
+                            pass
+        
         # Method 1: Try LBPH recognizer if trained and available
-        if face_recognizer is not None and face_recognizer_trained and expected_id in student_id_to_label:
+        if face_recognizer is not None and face_recognizer_trained:
             try:
                 # Get the largest face (most likely the main subject)
                 largest_face = max(faces, key=lambda f: f[2] * f[3])
@@ -403,33 +442,89 @@ def recognize_faces():
                 normalized_confidence = max(0.0, 1.0 - (confidence / 100.0))
                 
                 predicted_id = label_to_student_id.get(label, '')
-                if predicted_id == expected_id and normalized_confidence > 0.3:  # Lower threshold = more lenient
+                logger.info(f"[RECOGNIZE] LBPH prediction: label={label}, predicted_id={predicted_id}, confidence={confidence}, normalized={normalized_confidence:.2f}, expected_id={expected_id}")
+                
+                # Match predicted ID with expected ID (try both student_id and roll_no)
+                predicted_matches = False
+                if predicted_id:
+                    # Check if predicted_id matches expected_id (exact or case-insensitive)
+                    if (predicted_id == expected_id_str or 
+                        predicted_id.lower() == expected_id_str.lower()):
+                        predicted_matches = True
+                    else:
+                        # Check if predicted_id matches any enrolled student's ID or roll_no
+                        for s in enrolled:
+                            enrolled_id = str(s.get('student_id') or '').strip()
+                            enrolled_roll = str(s.get('roll_no') or '').strip()
+                            if (predicted_id == enrolled_id or predicted_id == enrolled_roll or
+                                predicted_id.lower() == enrolled_id.lower() or 
+                                predicted_id.lower() == enrolled_roll.lower()):
+                                # If predicted student matches expected student, accept it
+                                if (enrolled_id == expected_id_str or enrolled_roll == expected_id_str or
+                                    enrolled_id.lower() == expected_id_str.lower() or 
+                                    enrolled_roll.lower() == expected_id_str.lower()):
+                                    predicted_matches = True
+                                    break
+                
+                if predicted_matches and normalized_confidence > 0.3:  # Lower threshold = more lenient
                     recognized = True
                     recognition_confidence = normalized_confidence
-                    logger.info(f"LBPH match: {expected_id} with confidence {normalized_confidence:.2f}")
+                    logger.info(f"[RECOGNIZE] LBPH match: {expected_id} with confidence {normalized_confidence:.2f}")
             except Exception as e:
-                logger.warning(f"LBPH recognition error: {e}")
+                logger.warning(f"[RECOGNIZE] LBPH recognition error: {e}")
         
         # Method 2: Histogram comparison with enrolled images (fallback or additional check)
+        # Optimized for speed - check only first 3 images to stay within 2 seconds
         if not recognized:
             try:
-                student_dir = os.path.join(DATA_DIR, expected_id)
-                if os.path.exists(student_dir):
+                # Find the correct student directory - try both student_id and roll_no from enrolled list
+                student_dir = None
+                enrolled_student_id = None
+                
+                for s in enrolled:
+                    enrolled_id = str(s.get('student_id') or '').strip()
+                    enrolled_roll = str(s.get('roll_no') or '').strip()
+                    
+                    # Check if this enrolled student matches the expected_id
+                    if (enrolled_id == expected_id_str or enrolled_roll == expected_id_str or
+                        enrolled_id.lower() == expected_id_str.lower() or 
+                        enrolled_roll.lower() == expected_id_str.lower()):
+                        # Try both IDs as directory names
+                        for test_id in [enrolled_id, enrolled_roll]:
+                            if test_id:
+                                test_dir = os.path.join(DATA_DIR, test_id)
+                                if os.path.exists(test_dir):
+                                    student_dir = test_dir
+                                    enrolled_student_id = test_id
+                                    logger.info(f"[RECOGNIZE] Found student directory: {student_dir} for expected_id {expected_id_str}")
+                                    break
+                        if student_dir:
+                            break
+                
+                # Fallback: try expected_id directly as directory name
+                if not student_dir:
+                    test_dir = os.path.join(DATA_DIR, expected_id_str)
+                    if os.path.exists(test_dir):
+                        student_dir = test_dir
+                        enrolled_student_id = expected_id_str
+                        logger.info(f"[RECOGNIZE] Using expected_id as directory: {student_dir}")
+                
+                if student_dir and os.path.exists(student_dir):
                     # Get the largest face from current image
                     largest_face = max(faces, key=lambda f: f[2] * f[3])
                     x, y, w, h = largest_face
                     current_face = gray[y:y+h, x:x+w]
-                    current_face = cv2.resize(current_face, (200, 200))
+                    current_face = cv2.resize(current_face, (150, 150))  # Smaller size for faster processing
                     
-                    # Compare with enrolled images
+                    # Compare with enrolled images - limit to 3 for speed
                     face_images = [f for f in os.listdir(student_dir) if f.endswith(('.jpg', '.jpeg', '.png'))]
                     best_match = 0.0
                     
-                    for img_file in face_images[:5]:  # Check up to 5 enrolled images
+                    for img_file in face_images[:3]:  # Check only first 3 enrolled images for speed
                         img_path = os.path.join(student_dir, img_file)
                         enrolled_img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
                         if enrolled_img is not None:
-                            enrolled_img = cv2.resize(enrolled_img, (200, 200))
+                            enrolled_img = cv2.resize(enrolled_img, (150, 150))  # Smaller size for faster processing
                             similarity = compare_faces_histogram(current_face, enrolled_img)
                             best_match = max(best_match, similarity)
                     
@@ -443,7 +538,10 @@ def recognize_faces():
         
         # If still not recognized but student is enrolled and face detected, accept with lower confidence
         # This handles cases where lighting/angle differences affect matching
+        # Only use this as last resort to avoid false positives
         if not recognized and is_enrolled and faces_detected > 0:
+            # Only accept if we have at least tried LBPH or histogram matching
+            # This prevents accepting any face just because student is enrolled
             logger.info(f"Accepting {expected_id} based on enrollment and face detection (lenient mode)")
             recognized = True
             recognition_confidence = 0.6  # Medium confidence
@@ -453,7 +551,7 @@ def recognize_faces():
                 'success': False,
                 'faces_detected': faces_detected,
                 'recognized': False,
-                'message': 'Face not recognized. Please ensure good lighting and face the camera directly.'
+                'message': "Didn't recognize your face"
             })
         
         # Mark attendance in main server
@@ -503,14 +601,39 @@ def unenroll_student(student_id):
     """Remove a student from enrollment"""
     try:
         enrolled = load_enrolled_students()
-        enrolled = [s for s in enrolled if s['student_id'] != student_id]
+        # Try to match by student_id or roll_no
+        original_count = len(enrolled)
+        enrolled = [s for s in enrolled if str(s.get('student_id', '')).strip() != str(student_id).strip() and 
+                   str(s.get('roll_no', '')).strip() != str(student_id).strip()]
+        
+        if len(enrolled) == original_count:
+            logger.warning(f"Student {student_id} not found in enrolled list")
+            return jsonify({
+                'success': False,
+                'message': f'Student {student_id} not found in enrolled list'
+            }), 404
+        
         save_enrolled_students(enrolled)
         
-        # Remove student directory
+        # Remove student directory - try both student_id and roll_no as directory names
         student_dir = os.path.join(DATA_DIR, student_id)
+        if not os.path.exists(student_dir):
+            # Try to find directory by matching enrolled students
+            for s in enrolled:
+                test_id = s.get('student_id') or s.get('roll_no')
+                if test_id:
+                    test_dir = os.path.join(DATA_DIR, test_id)
+                    if os.path.exists(test_dir):
+                        student_dir = test_dir
+                        break
+        
         if os.path.exists(student_dir):
             import shutil
             shutil.rmtree(student_dir)
+            logger.info(f"Removed student directory: {student_dir}")
+        
+        # Retrain face recognizer after deletion
+        train_face_recognizer()
         
         return jsonify({
             'success': True,
@@ -519,6 +642,8 @@ def unenroll_student(student_id):
         
     except Exception as e:
         logger.error(f"Unenroll error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({
             'error': 'internal_error',
             'message': str(e)

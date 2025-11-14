@@ -27,16 +27,22 @@ export default function QRGeneratorPanel({ heading = 'Live Attendance QR' }){
     }
     const onCountdown = ({ secondsRemaining }) => setSecondsRemaining(secondsRemaining)
     const onScan = ({ countPresent, countRemaining }) => setStats({ present: countPresent, remaining: countRemaining })
+    const onFaceRecognition = ({ countPresent, countRemaining }) => {
+      // Update stats when face recognition marks attendance
+      setStats({ present: countPresent, remaining: countRemaining })
+    }
     const onClosed = () => { setSecondsRemaining(0); setQr(null) }
     socket.on('qr_updated', onQR)
     socket.on('countdown', onCountdown)
     socket.on('scan_confirmed', onScan)
+    socket.on('face_recognition_attendance', onFaceRecognition)
     socket.on('session_closed', onClosed)
     return () => {
       socket.emit('unsubscribe', { sessionId })
       socket.off('qr_updated', onQR)
       socket.off('countdown', onCountdown)
       socket.off('scan_confirmed', onScan)
+      socket.off('face_recognition_attendance', onFaceRecognition)
       socket.off('session_closed', onClosed)
     }
   }, [sessionId, socket])

@@ -128,7 +128,7 @@ export default function StudentScanAttendance() {
       status: 'success',
       message: result.alreadyMarked
         ? `Already marked present: ${result.studentId}`
-        : `Face recognized! Marked present: ${result.studentId} (${(result.confidence * 100).toFixed(1)}% confidence)`
+        : 'Face detected, attendance marked'
     })
   }
 

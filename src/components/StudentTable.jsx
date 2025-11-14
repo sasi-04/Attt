@@ -101,7 +101,8 @@ export default function StudentTable(){
     const socket = getSocket()
     
     const handleAdminUpdate = (update) => {
-      if (update.type === 'student-created' || update.type === 'student-deleted' || update.type === 'student-updated') {
+      if (update.type === 'student-created' || update.type === 'student-deleted' || update.type === 'student-updated' || update.type === 'face_attendance_marked') {
+        // Reload students when attendance is marked via face recognition to update attendance status
         setLoading(true)
         fetchStudentData()
       }

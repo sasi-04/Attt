@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useCallback } from 'react'
 import { apiGet } from '../../components/api.js'
+import { getSocket } from '../../components/ws.js'
 
 export default function Dashboard(){
   const [loading, setLoading] = useState(true)
@@ -13,59 +14,135 @@ export default function Dashboard(){
   })
   const [pendingLeaves, setPendingLeaves] = useState([])
 
-  useEffect(() => {
-    const fetchDashboardData = async () => {
-      try {
+  const fetchDashboardData = useCallback(async (showLoading = true) => {
+    try {
+      if (showLoading) {
         console.log('=== FETCHING STAFF DASHBOARD DATA ===')
-        
-        // Get staff email from localStorage
-        const user = JSON.parse(localStorage.getItem('ams_user') || '{}')
-        const staffEmail = user.email
-        
-        if (!staffEmail) {
-          console.error('No staff email found in localStorage')
-          setLoading(false)
-          return
-        }
-        
+      }
+      
+      // Get staff email from localStorage
+      const user = JSON.parse(localStorage.getItem('ams_user') || '{}')
+      const staffEmail = user.email
+      
+      if (!staffEmail) {
+        console.error('No staff email found in localStorage')
+        if (showLoading) setLoading(false)
+        return
+      }
+      
+      if (showLoading) {
         console.log('Staff email:', staffEmail)
-        
-        // Use staff-specific dashboard endpoint
-        const params = new URLSearchParams()
-        params.append('staffEmail', staffEmail)
-        
+      }
+      
+      // Use staff-specific dashboard endpoint
+      const params = new URLSearchParams()
+      params.append('staffEmail', staffEmail)
+      
+      if (showLoading) {
         console.log('Making API call to:', `/staff/dashboard/stats?${params.toString()}`)
-        const data = await apiGet(`/staff/dashboard/stats?${params.toString()}`)
+      }
+      const data = await apiGet(`/staff/dashboard/stats?${params.toString()}`)
+      
+      if (showLoading) {
         console.log('Staff dashboard data received:', data)
         console.log('Total Students in department:', data.totalStudents)
         console.log('Allowed departments:', data.allowedDepartments)
-        console.log('Full response object:', JSON.stringify(data, null, 2))
-        
-        setDashboardData(data)
-        
-        // Fetch pending leave requests
-        const leaveData = await apiGet('/leave/requests?status=pending')
-        setPendingLeaves(leaveData.requests || [])
-      } catch (error) {
-        console.error('Failed to fetch staff dashboard stats:', error)
-        // Fallback to general dashboard if staff endpoint fails
-        try {
-          console.log('Trying fallback to general dashboard...')
-          const fallbackData = await apiGet('/dashboard/stats')
-          setDashboardData(fallbackData)
-        } catch (fallbackError) {
-          console.error('Fallback dashboard also failed:', fallbackError)
+      }
+      
+      // Log received data for debugging
+      console.log('[DASHBOARD] Received data:', {
+        totalStudents: data.totalStudents,
+        presentToday: data.presentToday,
+        absentToday: data.absentToday,
+        advisorClassCount: data.advisorClassCount,
+        departmentTotalCount: data.departmentTotalCount,
+        staffInfo: data.staffInfo,
+        isClassAdvisor: data.staffInfo?.isClassAdvisor,
+        advisorFor: data.staffInfo?.advisorFor
+      })
+      
+      // Preserve staffInfo to maintain format consistency
+      setDashboardData(prevData => {
+        const newData = {
+          ...data,
+          // Ensure staffInfo is always preserved to maintain the class advisor format
+          staffInfo: data.staffInfo || prevData.staffInfo || {}
         }
-      } finally {
+        console.log('[DASHBOARD] Setting dashboard data:', {
+          totalStudents: newData.totalStudents,
+          presentToday: newData.presentToday,
+          absentToday: newData.absentToday,
+          staffInfo: newData.staffInfo
+        })
+        return newData
+      })
+      
+      // Fetch pending leave requests
+      const leaveData = await apiGet('/leave/requests?status=pending')
+      setPendingLeaves(leaveData.requests || [])
+    } catch (error) {
+      console.error('Failed to fetch staff dashboard stats:', error)
+      // Fallback to general dashboard if staff endpoint fails
+      try {
+        if (showLoading) {
+          console.log('Trying fallback to general dashboard...')
+        }
+        const fallbackData = await apiGet('/dashboard/stats')
+        // Preserve staffInfo in fallback too
+        setDashboardData(prevData => ({
+          ...fallbackData,
+          staffInfo: fallbackData.staffInfo || prevData.staffInfo || {}
+        }))
+      } catch (fallbackError) {
+        console.error('Fallback dashboard also failed:', fallbackError)
+      }
+    } finally {
+      if (showLoading) {
         setLoading(false)
       }
     }
-    fetchDashboardData()
   }, [])
+
+  useEffect(() => {
+    // Initial data fetch
+    fetchDashboardData()
+
+    // Set up WebSocket listener for real-time updates
+    const socket = getSocket()
+    
+    const handleAdminUpdate = (update) => {
+      // Refresh dashboard when attendance is marked via face recognition or QR scan
+      if (update.type === 'face_attendance_marked' || update.type === 'qr_attendance_marked' || update.type === 'attendance_marked') {
+        console.log('Attendance marked, refreshing dashboard data in real-time...', update)
+        // Add a small delay to ensure database is updated before refreshing
+        setTimeout(() => {
+          // Refresh dashboard data without showing loading state (silent update)
+          fetchDashboardData(false)
+        }, 500) // 500ms delay to allow database write to complete
+      }
+    }
+    
+    socket.on('admin-update', handleAdminUpdate)
+    
+    // Cleanup on unmount
+    return () => {
+      socket.off('admin-update', handleAdminUpdate)
+    }
+  }, [fetchDashboardData])
 
   // Create stats array based on whether user is a class advisor
   const isClassAdvisor = dashboardData.staffInfo?.isClassAdvisor
   const advisorFor = dashboardData.staffInfo?.advisorFor
+  
+  console.log('[DASHBOARD] Rendering with:', {
+    isClassAdvisor,
+    advisorFor,
+    totalStudents: dashboardData.totalStudents,
+    presentToday: dashboardData.presentToday,
+    absentToday: dashboardData.absentToday,
+    advisorClassCount: dashboardData.advisorClassCount,
+    departmentTotalCount: dashboardData.departmentTotalCount
+  })
   
   const stats = []
   
@@ -97,9 +174,17 @@ export default function Dashboard(){
   }
   
   // Add common stats
+  // For class advisors, present/absent should be based on their class students
+  // The backend already calculates this correctly, so we just use the values
+  const todayRate = dashboardData.todayAttendanceRate ?? 0
+  const presentToday = dashboardData.presentToday ?? 0
+  const absentToday = dashboardData.absentToday ?? 0
+  
+  console.log('[DASHBOARD] Present/Absent values:', { presentToday, absentToday, todayRate })
+  
   stats.push(
-    { label: 'Present Today', value: dashboardData.presentToday, sub: `${dashboardData.todayAttendanceRate}%`, icon: '✓' },
-    { label: 'Absent Today', value: dashboardData.absentToday, icon: '✗' },
+    { label: 'Present Today', value: presentToday, sub: `${todayRate}%`, icon: '✓' },
+    { label: 'Absent Today', value: absentToday, icon: '✗' },
     { label: 'Total Sessions', value: dashboardData.totalSessions || 0, icon: '📅' }
   )
   const average = dashboardData.overallAttendanceRate || 0

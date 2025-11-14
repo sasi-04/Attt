@@ -1751,17 +1751,35 @@ app.get('/staff/dashboard/stats', async (req, res) => {
     let advisorClassCount = 0
     
     if (staff.isClassAdvisor && staff.advisorFor) {
+      const advisorDept = staff.advisorFor.department
+      const advisorYear = staff.advisorFor.year
+      
+      console.log(`[DASHBOARD] Filtering students for class advisor: ${advisorDept} ${advisorYear}`)
+      
       advisorClassStudents = allStudents.filter(s => {
         const studentDept = s.department || 'Unknown'
         const studentYear = s.year || 'Unknown'
-        return studentDept === staff.advisorFor.department && 
-               studentYear === staff.advisorFor.year &&
+        const matches = studentDept === advisorDept && 
+               studentYear === advisorYear &&
                !s.isYearPlaceholder && 
                !s.isDepartmentPlaceholder && 
                !s.isPlaceholder
+        if (matches) {
+          console.log(`[DASHBOARD] Matched student: ${s.name} (${s.regNo || s.studentId}) - Dept: ${studentDept}, Year: ${studentYear}`)
+        }
+        return matches
       })
       advisorClassCount = advisorClassStudents.length
-      console.log(`Class advisor: Found ${advisorClassCount} students in ${staff.advisorFor.department} ${staff.advisorFor.year}`)
+      console.log(`[DASHBOARD] Class advisor: Found ${advisorClassCount} students in ${advisorDept} ${advisorYear}`)
+      if (advisorClassCount === 0) {
+        console.log(`[DASHBOARD] WARNING: No students found for class advisor!`)
+        console.log(`[DASHBOARD] All students sample:`, allStudents.slice(0, 5).map(s => ({ 
+          name: s.name, 
+          regNo: s.regNo, 
+          dept: s.department, 
+          year: s.year 
+        })))
+      }
     }
     
     // Get attendance data
@@ -1769,40 +1787,90 @@ app.get('/staff/dashboard/stats', async (req, res) => {
     const allSessions = await getAllSessions()
     
     // Calculate today's attendance
-    const today = new Date()
-    today.setHours(0, 0, 0, 0)
-    const todayStr = today.toISOString().split('T')[0]
+    // Use UTC date to avoid timezone issues - get today's date in local timezone but compare consistently
+    const now = new Date()
+    // Get today's date string in local timezone (YYYY-MM-DD format)
+    const todayLocal = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+    const todayStr = todayLocal.toISOString().split('T')[0]
+    const todayStart = todayLocal.getTime()
+    const todayEnd = todayStart + (24 * 60 * 60 * 1000) // End of today
     
+    console.log(`[DASHBOARD] Today calculation: todayStr=${todayStr}, todayStart=${todayStart} (${new Date(todayStart).toISOString()}), todayEnd=${todayEnd} (${new Date(todayEnd).toISOString()})`)
+    
+    // Get sessions from today (using both date string and timestamp comparison for robustness)
     const todaySessions = allSessions.filter(s => {
       if (!s.startTime) return false
-      const sessionDate = new Date(s.startTime).toISOString().split('T')[0]
-      return sessionDate === todayStr
+      const sessionDate = new Date(s.startTime)
+      // Get session date in same timezone as today
+      const sessionDateLocal = new Date(sessionDate.getFullYear(), sessionDate.getMonth(), sessionDate.getDate())
+      const sessionDateStr = sessionDateLocal.toISOString().split('T')[0]
+      const sessionTime = sessionDate.getTime()
+      
+      // Check if session is within today's date range
+      const matchesDateStr = sessionDateStr === todayStr
+      const matchesTimeRange = sessionTime >= todayStart && sessionTime < todayEnd
+      
+      return matchesDateStr || matchesTimeRange
     })
+    
+    console.log(`[DASHBOARD] Today's date: ${todayStr}, Found ${todaySessions.length} sessions today`)
+    console.log(`[DASHBOARD] Today's session IDs:`, todaySessions.map(s => ({ id: s.id, startTime: s.startTime })))
     
     const todayPresent = new Set()
     const todaySessionIds = new Set(todaySessions.map(s => s.id))
+    
+    console.log(`[DASHBOARD] Total attendance records: ${allAttendance.length}`)
+    const todayAttendanceRecords = allAttendance.filter(a => todaySessionIds.has(a.sessionId))
+    console.log(`[DASHBOARD] Attendance records for today's sessions:`, todayAttendanceRecords.map(a => ({ studentId: a.studentId, sessionId: a.sessionId })))
+    
+    // For class advisors, use their class students; otherwise use all department students
+    // Always use advisorClassStudents for class advisors (even if empty - that's the correct count)
+    const studentsForAttendance = (staff.isClassAdvisor && staff.advisorFor) 
+      ? advisorClassStudents 
+      : departmentStudents
+    
+    console.log(`[DASHBOARD] Decision: staff.isClassAdvisor=${staff.isClassAdvisor}, has advisorFor=${!!staff.advisorFor}, advisorClassStudents.length=${advisorClassStudents.length}`)
+    console.log(`[DASHBOARD] Using ${studentsForAttendance.length} students for attendance calculation (${staff.isClassAdvisor ? 'Class Advisor' : 'Regular Staff'})`)
+    if (staff.isClassAdvisor && staff.advisorFor) {
+      console.log(`[DASHBOARD] Class Advisor students (${advisorClassStudents.length}):`, advisorClassStudents.map(s => ({ regNo: s.regNo, studentId: s.studentId, name: s.name, dept: s.department, year: s.year })))
+      console.log(`[DASHBOARD] Department students (${departmentStudents.length}):`, departmentStudents.slice(0, 3).map(s => ({ regNo: s.regNo, studentId: s.studentId, name: s.name, dept: s.department, year: s.year })))
+    }
+    
     allAttendance.filter(a => todaySessionIds.has(a.sessionId))
       .forEach(a => {
-        // Only count students from allowed departments
-        const student = departmentStudents.find(s => s.regNo === a.studentId || s.studentId === a.studentId)
+        // Count students based on whether they're in the relevant student list
+        // Try multiple matching strategies to ensure we find the student
+        const student = studentsForAttendance.find(s => {
+          const studentRegNo = s.regNo || s.studentId || ''
+          const studentId = s.studentId || s.regNo || ''
+          const attendanceId = a.studentId || ''
+          return studentRegNo === attendanceId || 
+                 studentId === attendanceId ||
+                 studentRegNo.toString() === attendanceId.toString() ||
+                 studentId.toString() === attendanceId.toString()
+        })
         if (student) {
           todayPresent.add(a.studentId)
+          console.log(`[DASHBOARD] Found present student: ${a.studentId} (matched with ${student.regNo || student.studentId})`)
         }
       })
     
-    const totalStudents = departmentStudents.length
+    const totalStudents = studentsForAttendance.length
     const presentToday = todayPresent.size
     const absentToday = totalStudents - presentToday
+    
+    console.log(`[DASHBOARD] Attendance stats: total=${totalStudents}, present=${presentToday}, absent=${absentToday}`)
     const todayAttendanceRate = todaySessions.length > 0 && totalStudents > 0 
       ? Math.round((presentToday / totalStudents) * 100) 
       : 0
     
     // Overall attendance rate (all sessions)
+    // Use the same student list as for today's attendance (class advisor's students if applicable)
     const totalSessionCount = allSessions.length
     let overallPresentCount = 0
     let overallTotalPossible = totalStudents * totalSessionCount
     
-    for (const student of departmentStudents) {
+    for (const student of studentsForAttendance) {
       const studentId = student.regNo || student.studentId
       const studentAttendance = await getStudentAttendance(studentId)
       overallPresentCount += studentAttendance.length
@@ -1813,10 +1881,11 @@ app.get('/staff/dashboard/stats', async (req, res) => {
       : 0
     
     // Low attendance students (below 75%)
+    // Use the same student list as for today's attendance (class advisor's students if applicable)
     const lowAttendanceStudents = []
     const studentStats = []
     
-    for (const student of departmentStudents) {
+    for (const student of studentsForAttendance) {
       const studentId = student.regNo || student.studentId
       const studentAttendance = await getStudentAttendance(studentId)
       const stats = calculateAttendanceStats(studentAttendance.length, totalSessionCount)
@@ -1840,12 +1909,13 @@ app.get('/staff/dashboard/stats', async (req, res) => {
     // Sort low attendance by percentage (lowest first)
     lowAttendanceStudents.sort((a, b) => a.percentage - b.percentage)
     
-    // Recent activity with names and details (filtered by department)
+    // Recent activity with names and details (filtered by relevant student list)
+    // For class advisors, show only their class students' activity
     const recentActivity = []
     const recentRecords = allAttendance.slice(-50).reverse()
     
     for (const record of recentRecords) {
-      const student = departmentStudents.find(s => 
+      const student = studentsForAttendance.find(s => 
         s.regNo === record.studentId || s.studentId === record.studentId
       )
       
@@ -1865,7 +1935,16 @@ app.get('/staff/dashboard/stats', async (req, res) => {
       if (recentActivity.length >= 10) break
     }
     
-    return res.json({
+    // Final verification before response
+    console.log(`[DASHBOARD] FINAL VALUES BEFORE RESPONSE:`)
+    console.log(`  studentsForAttendance.length: ${studentsForAttendance.length}`)
+    console.log(`  totalStudents: ${totalStudents}`)
+    console.log(`  presentToday: ${presentToday}`)
+    console.log(`  absentToday: ${absentToday}`)
+    console.log(`  advisorClassCount: ${advisorClassCount}`)
+    console.log(`  departmentTotalCount: ${departmentStudents.length}`)
+    
+    const responseData = {
       totalStudents,
       presentToday,
       absentToday,
@@ -1878,7 +1957,7 @@ app.get('/staff/dashboard/stats', async (req, res) => {
       allowedDepartments,
       // Class advisor specific data
       advisorClassCount: staff.isClassAdvisor ? advisorClassCount : null,
-      departmentTotalCount: totalStudents,
+      departmentTotalCount: departmentStudents.length, // Always return full department count
       staffInfo: {
         email: staff.email,
         name: staff.name,
@@ -1886,7 +1965,11 @@ app.get('/staff/dashboard/stats', async (req, res) => {
         isClassAdvisor: staff.isClassAdvisor,
         advisorFor: staff.advisorFor
       }
-    })
+    }
+    
+    console.log(`[DASHBOARD] RESPONSE DATA:`, JSON.stringify(responseData, null, 2))
+    
+    return res.json(responseData)
   } catch (error) {
     console.error('Staff dashboard stats error:', error)
     return res.status(500).json({ error: 'internal_error' })
@@ -4048,6 +4131,40 @@ app.get('/face-recognition/students', async (req, res) => {
     return res.status(500).json({ 
       error: 'internal_error',
       message: 'Failed to get face recognition students'
+    })
+  }
+})
+
+// Delete/unenroll student from face recognition
+app.delete('/face-recognition/unenroll/:studentId', async (req, res) => {
+  try {
+    const { studentId } = req.params
+    console.log('[FACE] Forwarding unenroll request to service', { studentId })
+    
+    const response = await fetch(`${FACE_SERVICE_URL}/unenroll/${encodeURIComponent(studentId)}`, {
+      method: 'DELETE'
+    })
+    
+    const result = await response.json()
+    
+    if (!response.ok) {
+      console.warn('[FACE] Unenroll service returned error', response.status, result)
+      return res.status(response.status).json(result)
+    }
+    
+    // Broadcast enrollment update to admin
+    broadcastAdminUpdate('face_recognition_unenrolled', {
+      studentId: studentId,
+      timestamp: Date.now()
+    })
+    
+    return res.json(result)
+    
+  } catch (error) {
+    console.error('Face recognition unenroll proxy error:', error)
+    return res.status(500).json({ 
+      error: 'internal_error',
+      message: 'Failed to unenroll student from face recognition'
     })
   }
 })
